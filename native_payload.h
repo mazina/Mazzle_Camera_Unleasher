@@ -2,7 +2,7 @@
 // Registration is additive, before any CustomPropertyManager exists.
 #include "native_validation.h"
 namespace NativePayload {
-constexpr uintptr_t RegistryRva=RVA_StructRegistry, StaticStructsRva=RVA_StaticStructs;
+static uintptr_t& RegistryRva=RVA_StructRegistry;static uintptr_t& StaticStructsRva=RVA_StaticStructs;
 struct Array { void* data; uint32_t capacity,size; };
 struct Base { uint32_t name=0xffffffff; bool canPrevent=false,prevented=false,stopped=false; uint8_t pad=0; };
 struct UpdateEvent:Base {uint64_t entity=0;void* camera=nullptr;float dt=0;};

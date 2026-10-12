@@ -1,3 +1,4 @@
+#define NOMINMAX
 #include <windows.h>
 #include <tlhelp32.h>
 #include <bcrypt.h>
@@ -36,6 +37,7 @@ struct OptionalInt{int value;bool hasValue;Byte padding[3];};
 static SeString Borrow(char const* text){SeString s{};s.size=static_cast<uint32_t>(strlen(text));if(s.size<=15){memcpy(s.inlineData,text,s.size+1);s.capacity=15;}else{s.ptr=text;s.capacity=s.size;}return s;}
 #include "lua_value.h"
 #include "native_encoding.h"
+#include "runtime_resolver.h"
 static_assert(sizeof(TValue)==16);
 static TValue* At(void* L,int index){return Se<TValue*(*)(void*,int)>(RVA_Index)(L,index);}
 static int Top(void* L){return static_cast<int>((Field<Byte*>(L,SeAbi::LuaTop)-Field<Byte*>(Field<void*>(L,SeAbi::LuaCallInfo),0))/16)-1;}
@@ -77,12 +79,13 @@ static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0
  if(enabled.load() && !Field<bool>(ext,SeAbi::ExtensionResetPending) && state && state==installedState.load()){
   void* L=Field<void*>(state,SeAbi::StateLua);int top=Top(L);
   if(Se<int(*)(void*,int)>(RVA_CheckStack)(L,64)){
-   alignas(8) Byte lifetime[SeAbi::PinBytes]{};
+   alignas(8) Byte lifetime[SeAbi::PinBytes]{};alignas(8) Byte profiler[8]{};
    InitializeLifetimePin(lifetime,L,static_cast<Byte*>(state)+SeAbi::StateLifetimeStack);
+   if(RVA_ProfilerCtor)Se<void(*)(void*,void*)>(RVA_ProfilerCtor)(profiler,state);
    auto native=NativePayload::Dispatch(static_cast<unsigned>(event),state,L,camera,dt,entity,input,static_cast<float>(original),ignore,select,*Field<uint64_t*>(lifetime,SeAbi::PinCurrentReference));++calls[event];
    result.successful=native.status==0;result.prevented=native.status==2;result.value=native.pitch;result.hasNumber=event==5;result.inputResult=native.input;
    if(native.status==1){++errors;Log("native event dispatch failed; engine fallback retained");}
-   SetTop(L,top);Se<void(*)(void*)>(RVA_LifetimeDtor)(lifetime);
+   SetTop(L,top);if(RVA_ProfilerDtor)Se<void(*)(void*)>(RVA_ProfilerDtor)(profiler);Se<void(*)(void*)>(RVA_LifetimeDtor)(lifetime);
   }
  }
  Se<void(*)(void*,bool)>(RVA_DecRefs)(ext,true);context=priorContext;return result;
@@ -104,8 +107,63 @@ static void* AllocateRelay(uintptr_t site){SYSTEM_INFO info;GetSystemInfo(&info)
 static bool InstallKeyboard(){auto site=gameBase+RVA_KeyboardGate;auto relay=static_cast<Byte*>(AllocateRelay(reinterpret_cast<uintptr_t>(site)));if(!relay)return false;int32_t modeOffset;memcpy(&modeOffset,site+2,4);KeyboardMovementControllerMode=site+7+modeOffset;Byte jump[]={0xff,0x25,0,0,0,0};memcpy(relay,jump,6);auto bridge=&KeyboardMovementModeBridge;memcpy(relay+6,&bridge,8);DWORD old;if(!VirtualProtect(relay,14,PAGE_EXECUTE_READ,&old))return false;FlushInstructionCache(GetCurrentProcess(),relay,14);auto displacement=reinterpret_cast<intptr_t>(relay)-reinterpret_cast<intptr_t>(site+5);if(displacement<INT32_MIN || displacement>INT32_MAX)return false;Byte replacement[]={0xe8,0,0,0,0,0x84,0xc0};int32_t rel32=static_cast<int32_t>(displacement);memcpy(replacement+1,&rel32,4);if(!VirtualProtect(site,7,PAGE_EXECUTE_READWRITE,&old))return false;memcpy(site,replacement,7);DWORD ignored;VirtualProtect(site,7,old,&ignored);FlushInstructionCache(GetCurrentProcess(),site,7);return true;}
 static bool EnlistThreads(std::vector<HANDLE>& opened){HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(snap==INVALID_HANDLE_VALUE)return false;THREADENTRY32 entry{sizeof(entry)};bool ok=true;if(Thread32First(snap,&entry))do{if(entry.th32OwnerProcessID==GetCurrentProcessId() && entry.th32ThreadID!=GetCurrentThreadId()){HANDLE h=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_SET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,entry.th32ThreadID);if(!h){ok=false;break;}opened.push_back(h);if(DetourUpdateThread(h)!=NO_ERROR){ok=false;break;}}}while(Thread32Next(snap,&entry));CloseHandle(snap);return ok;}
 struct Hook{uintptr_t rva;bool se;void** original;void* hook;Byte const* bytes;size_t size;};
-static DWORD WINAPI Start(void* instance){logFile=_wfsopen(LR"(C:\Users\mazzin\AppData\Local\Larian Studios\Baldur's Gate 3\Script Extender\MazzleNativeCameraBridgeFull.log)",L"w",_SH_DENYNO);Log("full experimental standalone camera/input bridge starts");wchar_t path[32768];GetModuleFileNameW(static_cast<HMODULE>(instance),path,32768);std::wstring companionPath(path);companionPath=companionPath.substr(0,companionPath.find_last_of(L"\\/")+1)+L"bridge.lua";std::ifstream file(companionPath);companion.assign(std::istreambuf_iterator<char>(file),{});if(companion.empty()){Log("bridge.lua missing; no hooks installed");return 1;}HMODULE se=nullptr;for(unsigned i=0;i<600 && !se;++i){se=GetModuleHandleW(L"BG3ScriptExtender.dll");if(!se)Sleep(100);}if(!se){Log("SE missing");return 2;}GetModuleFileNameW(se,path,32768);if(HashFile(path)!=SE_HASH){Log("SE hash mismatch; no hooks installed");return 3;}GetModuleFileNameW(nullptr,path,32768);if(HashFile(path)!=GAME_HASH){Log("game hash mismatch; no hooks installed");return 4;}seBase=reinterpret_cast<Byte*>(se);gameBase=reinterpret_cast<Byte*>(GetModuleHandleW(nullptr));
- Hook hooks[]={{RVA_TypeInitialize,true,reinterpret_cast<void**>(&NativePayload::nextTypeInitialize),reinterpret_cast<void*>(NativePayload::InitializeTypes),Bytes_TypeInitialize,sizeof(Bytes_TypeInitialize)},{RVA_ResizeStructs,true,reinterpret_cast<void**>(&NativePayload::nextResize),reinterpret_cast<void*>(NativePayload::ResizeStatics),Bytes_ResizeStructs,sizeof(Bytes_ResizeStructs)},{RVA_OnUpdate,true,reinterpret_cast<void**>(&nextUpdate),reinterpret_cast<void*>(Update),Bytes_OnUpdate,sizeof(Bytes_OnUpdate)},{RVA_Shutdown,true,reinterpret_cast<void**>(&nextShutdown),reinterpret_cast<void*>(Shutdown),Bytes_Shutdown,sizeof(Bytes_Shutdown)},{RVA_ClientInitialize,true,reinterpret_cast<void**>(&nextInitialize),reinterpret_cast<void*>(InitializeState),Bytes_ClientInitialize,sizeof(Bytes_ClientInitialize)},{RVA_UpdateCamera,false,reinterpret_cast<void**>(&nextCamera),reinterpret_cast<void*>(Camera),Bytes_UpdateCamera,sizeof(Bytes_UpdateCamera)},{RVA_UpdatePitch,false,reinterpret_cast<void**>(&nextUpdatePitch),reinterpret_cast<void*>(UpdatePitch),Bytes_UpdatePitch,sizeof(Bytes_UpdatePitch)},{RVA_UpdateZoom,false,reinterpret_cast<void**>(&nextZoom),reinterpret_cast<void*>(Zoom),Bytes_UpdateZoom,sizeof(Bytes_UpdateZoom)},{RVA_Pitch,false,reinterpret_cast<void**>(&nextPitch),reinterpret_cast<void*>(Pitch),Bytes_Pitch,sizeof(Bytes_Pitch)},{RVA_Input,false,reinterpret_cast<void**>(&nextInput),reinterpret_cast<void*>(Input),Bytes_Input,sizeof(Bytes_Input)},{RVA_ResetZoom,false,reinterpret_cast<void**>(&nextReset),reinterpret_cast<void*>(ResetZoom),Bytes_ResetZoom,sizeof(Bytes_ResetZoom)}};
+static bool ResolveRuntime(HMODULE module,wchar_t const* modulePath){
+ using namespace RuntimeResolver;
+ auto base=reinterpret_cast<Byte*>(module);auto dos=reinterpret_cast<IMAGE_DOS_HEADER const*>(base);auto nt=reinterpret_cast<IMAGE_NT_HEADERS64 const*>(base+dos->e_lfanew);
+ Image image;image.memory={base,nt->OptionalHeader.SizeOfImage};image.pointerBase=reinterpret_cast<uintptr_t>(base);auto section=IMAGE_FIRST_SECTION(nt);
+ for(unsigned i=0;i<nt->FileHeader.NumberOfSections;++i)image.sections.push_back({section[i].VirtualAddress,std::max(section[i].Misc.VirtualSize,section[i].SizeOfRawData),section[i].Characteristics});
+ std::wstring path=modulePath;auto dot=path.find_last_of(L'.');if(dot==std::wstring::npos)return false;path.resize(dot);path+=L".symtab";
+ std::ifstream file(path,std::ios::binary);std::vector<Byte> symbols{std::istreambuf_iterator<char>(file),{}};Resolution result;std::string why;auto begin=GetTickCount64();
+ if(!Resolve(image,symbols,result,why)){Log(("SE resolver refused before hooks: "+why).c_str());return false;}
+ RVA_OnUpdate=result.rva[Slot(Id::OnUpdate)];
+ RVA_Shutdown=result.rva[Slot(Id::Shutdown)];
+ RVA_IncRefs=result.rva[Slot(Id::IncRefs)];
+ RVA_DecRefs=result.rva[Slot(Id::DecRefs)];
+ RVA_LoadScript=result.rva[Slot(Id::LoadScript)];
+ RVA_SetTop=result.rva[Slot(Id::SetTop)];
+ RVA_ClientInitialize=result.rva[Slot(Id::ClientInitialize)];
+ RVA_PushString=result.rva[Slot(Id::PushString)];
+ RVA_PushClosure=result.rva[Slot(Id::PushClosure)];
+ RVA_SetTable=result.rva[Slot(Id::SetTable)];
+ RVA_CheckStack=result.rva[Slot(Id::CheckStack)];
+ RVA_Index=result.rva[Slot(Id::Index)];
+ RVA_LifetimeDtor=result.rva[Slot(Id::LifetimeDtor)];
+ RVA_AddMember=result.rva[Slot(Id::AddMember)];
+ RVA_StaticFloatType=result.rva[Slot(Id::StaticFloatType)];
+ RVA_StaticBoolType=result.rva[Slot(Id::StaticBoolType)];
+ RVA_StaticUInt16Type=result.rva[Slot(Id::StaticUInt16Type)];
+ RVA_StaticEntityType=result.rva[Slot(Id::StaticEntityType)];
+ RVA_Alloc=result.rva[Slot(Id::Alloc)];
+ RVA_Free=result.rva[Slot(Id::Free)];
+ RVA_ValidateMap=result.rva[Slot(Id::ValidateMap)];
+ RVA_SerializeRaw=result.rva[Slot(Id::SerializeRaw)];
+ RVA_UnserializeRaw=result.rva[Slot(Id::UnserializeRaw)];
+ RVA_GetRawObject=result.rva[Slot(Id::GetRawObject)];
+ RVA_PushInternalFunction=result.rva[Slot(Id::PushInternalFunction)];
+ RVA_DispatchEvent=result.rva[Slot(Id::DispatchEvent)];
+ RVA_InheritProperties=result.rva[Slot(Id::InheritProperties)];
+ RVA_ProcessDefinitions=result.rva[Slot(Id::ProcessDefinitions)];
+ RVA_RegisterClass=result.rva[Slot(Id::RegisterClass)];
+ RVA_FixedStringCreate=result.rva[Slot(Id::FixedStringCreate)];
+ RVA_FixedStringText=result.rva[Slot(Id::FixedStringText)];
+ RVA_FixedStringRelease=result.rva[Slot(Id::FixedStringRelease)];
+ RVA_ArgError=result.rva[Slot(Id::ArgError)];
+ RVA_LuaError=result.rva[Slot(Id::LuaError)];
+ RVA_TypeInitialize=result.rva[Slot(Id::TypeInitialize)];
+ RVA_ResizeStructs=result.rva[Slot(Id::ResizeStructs)];
+ RVA_LifetimeAllocate=result.rva[Slot(Id::LifetimeAllocate)];
+ RVA_LifetimePush=result.rva[Slot(Id::LifetimePush)];
+ RVA_FinalizeClass=result.rva[Slot(Id::FinalizeClass)];
+ RVA_TLSIndex=result.rva[Slot(Id::TLSIndex)];
+ RVA_StructRegistry=result.rva[Slot(Id::StructRegistry)];
+ RVA_StaticStructs=result.rva[Slot(Id::StaticStructs)];
+ RVA_ProfilerCtor=result.rva[Slot(Id::ProfilerCtor)];
+ RVA_ProfilerDtor=result.rva[Slot(Id::ProfilerDtor)];
+ TLS_ContextOffset=result.contextOffset;
+ char message[220];snprintf(message,sizeof(message),"SE symtab resolved; ms=%llu context=%zx registry=%zx statics=%zx finalize=%zx profiler=%zx",GetTickCount64()-begin,TLS_ContextOffset,RVA_StructRegistry,RVA_StaticStructs,RVA_FinalizeClass,RVA_ProfilerCtor);Log(message);return true;
+}
+static DWORD WINAPI Start(void* instance){logFile=_wfsopen(LR"(C:\Users\mazzin\AppData\Local\Larian Studios\Baldur's Gate 3\Script Extender\MazzleNativeCameraBridgeFull.log)",L"w",_SH_DENYNO);Log("full experimental standalone camera/input bridge starts");wchar_t path[32768];GetModuleFileNameW(static_cast<HMODULE>(instance),path,32768);std::wstring companionPath(path);companionPath=companionPath.substr(0,companionPath.find_last_of(L"\\/")+1)+L"bridge.lua";std::ifstream file(companionPath);companion.assign(std::istreambuf_iterator<char>(file),{});if(companion.empty()){Log("bridge.lua missing; no hooks installed");return 1;}HMODULE se=nullptr;for(unsigned i=0;i<600 && !se;++i){se=GetModuleHandleW(L"BG3ScriptExtender.dll");if(!se)Sleep(100);}if(!se){Log("SE missing");return 2;}GetModuleFileNameW(se,path,32768);if(!ResolveRuntime(se,path))return 3;GetModuleFileNameW(nullptr,path,32768);if(HashFile(path)!=GAME_HASH){Log("game hash mismatch; no hooks installed");return 4;}seBase=reinterpret_cast<Byte*>(se);gameBase=reinterpret_cast<Byte*>(GetModuleHandleW(nullptr));
+ Hook hooks[]={{RVA_TypeInitialize,true,reinterpret_cast<void**>(&NativePayload::nextTypeInitialize),reinterpret_cast<void*>(NativePayload::InitializeTypes),nullptr,0},{RVA_ResizeStructs,true,reinterpret_cast<void**>(&NativePayload::nextResize),reinterpret_cast<void*>(NativePayload::ResizeStatics),nullptr,0},{RVA_OnUpdate,true,reinterpret_cast<void**>(&nextUpdate),reinterpret_cast<void*>(Update),nullptr,0},{RVA_Shutdown,true,reinterpret_cast<void**>(&nextShutdown),reinterpret_cast<void*>(Shutdown),nullptr,0},{RVA_ClientInitialize,true,reinterpret_cast<void**>(&nextInitialize),reinterpret_cast<void*>(InitializeState),nullptr,0},{RVA_UpdateCamera,false,reinterpret_cast<void**>(&nextCamera),reinterpret_cast<void*>(Camera),Bytes_UpdateCamera,sizeof(Bytes_UpdateCamera)},{RVA_UpdatePitch,false,reinterpret_cast<void**>(&nextUpdatePitch),reinterpret_cast<void*>(UpdatePitch),Bytes_UpdatePitch,sizeof(Bytes_UpdatePitch)},{RVA_UpdateZoom,false,reinterpret_cast<void**>(&nextZoom),reinterpret_cast<void*>(Zoom),Bytes_UpdateZoom,sizeof(Bytes_UpdateZoom)},{RVA_Pitch,false,reinterpret_cast<void**>(&nextPitch),reinterpret_cast<void*>(Pitch),Bytes_Pitch,sizeof(Bytes_Pitch)},{RVA_Input,false,reinterpret_cast<void**>(&nextInput),reinterpret_cast<void*>(Input),Bytes_Input,sizeof(Bytes_Input)},{RVA_ResetZoom,false,reinterpret_cast<void**>(&nextReset),reinterpret_cast<void*>(ResetZoom),Bytes_ResetZoom,sizeof(Bytes_ResetZoom)}};
  for(auto& hook:hooks){auto target=(hook.se?seBase:gameBase)+hook.rva;if(hook.bytes && memcmp(target,hook.bytes,hook.size)){Log("hook prologue mismatch; no hooks installed");return 5;}*hook.original=target;}if(memcmp(gameBase+RVA_KeyboardGate,Bytes_KeyboardGate,sizeof(Bytes_KeyboardGate)) || memcmp(gameBase+RVA_Definition,Bytes_Definition,sizeof(Bytes_Definition))){Log("gate/getter prologue mismatch");return 6;}
  LONG result=DetourTransactionBegin();std::vector<HANDLE> opened;if(result==NO_ERROR && !EnlistThreads(opened))result=ERROR_ACCESS_DENIED;for(auto& hook:hooks)if(result==NO_ERROR)result=DetourAttach(hook.original,hook.hook);if(result==NO_ERROR)result=DetourTransactionCommit();else DetourTransactionAbort();for(HANDLE h:opened)CloseHandle(h);if(result==NO_ERROR)keyboardAvailable=InstallKeyboard();char message[140];snprintf(message,sizeof(message),"hooks result=%ld keyboard=%d; default override false",result,keyboardAvailable);Log(message);return result;
 }

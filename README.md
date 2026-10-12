@@ -14,9 +14,9 @@ The build paths can be set with BRIDGE_TOOLS_DIR, BRIDGE_VCVARS, and BRIDGE_DETO
 
 ## Runtime
 
-The native mod loader loads the DLL from BG3's bin\NativeMods. Place bridge.lua beside the DLL. The plugin verifies the exact SE DLL and game executable hashes before installing hooks.
+The native mod loader loads the DLL from BG3's bin\NativeMods. Place bridge.lua beside the DLL. The plugin retains the game executable hash guard. It resolves native SE functions from the matching BG3ScriptExtender.symtab beside the loaded SE DLL, then verifies supported instruction/layout forms and helper/global relationships before installing any hooks. Missing, ambiguous, stale, or unsupported mappings refuse activation. The normal updater cache ships both files together.
 
-The tested active runtime is candidate 085CB77 with official Release v33 digest 73f6e7e (SE DLL C5E9041A, source af85fd2). The updater configuration is `{}` and uses the default Release channel; no version or digest pin is active. The bridge supports this exact verified DLL and game executable. A future updater release with a different DLL hash will safely refuse hooks until its ABI is mapped and tested.
+The tested active runtime is candidate 00F341. The same unchanged DLL passed on the published Release C5E9041A (package73f6e7e, source af85fd2) and published Devel791C11 (package8d13e4cd, source45f32c1). Final runtime uses default Release with the original updater `{}` and no pin. There is no SE DLL hash whitelist or address profile. Recognized native instruction forms remain conservative: another compiler/body or unsupported ABI is rejected pending review; this is not universal compatibility.
 
 ## Lua interface
 
@@ -24,6 +24,6 @@ See [NATIVE_BRIDGE_API.md](NATIVE_BRIDGE_API.md). All ten camera/input event pay
 
 ## Research and validation
 
-Tests, probes, ABI research, build artifacts, validation reports, and runtime backups belong in the separate tools repositories. The current Release evidence is D:\BG3_Modding\Tools\Mazzle_Native_Camera_Bridge\ReleaseRetarget-20261012T225424Z\RESULTS.md. It includes exact published-package provenance, all mapped native ABI entries, offline negative tests, all ten native event contracts, input prevention, WASD control, reset recovery, and immutable rollback artifacts. Earlier native event proofs remain historical evidence in the camera tools repository.
+Tests, probes, ABI research, build artifacts, validation reports, and runtime backups belong in the separate tools repositories. The current Release evidence is D:\BG3_Modding\Tools\Mazzle_Native_Camera_Bridge\RuntimeResolver-20261012T192902Z\RESULTS.md. It includes exact published-package provenance, all mapped native ABI entries, offline negative tests, all ten native event contracts, input prevention, WASD control, reset recovery, and immutable rollback artifacts. Earlier native event proofs remain historical evidence in the camera tools repository.
 
 Previous prototypes and source snapshots in the camera tools repository are historical research. The active implementation is owned by this repository.
