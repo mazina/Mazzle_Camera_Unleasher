@@ -28,7 +28,9 @@ static_assert(sizeof(ClassEntry)==80 && sizeof(PropertyEntry)==80 && sizeof(Desc
 static constexpr unsigned Count=10;
 static int firstId=-1,cameraId=-1,inputId=-1,definitionId=-1,parentId=-1;
 static void* maps[Count]{};static bool early=false,ready=false;static std::atomic<unsigned> vmCount{0};
+#if MAZZLE_BRIDGE_DIAGNOSTICS
 static std::atomic<uint64_t> validationCalls[12]{};
+#endif
 using TypeInitialize=void(*)(void*);static TypeInitialize nextTypeInitialize;
 using Resize=void(*)(void*,uint32_t);static Resize nextResize;
 static char const* names[Count]={"CameraUpdating","CameraUpdated","CameraPitchUpdating","CameraPitchUpdated","CameraZoomUpdated","CameraPitchCalculated","CameraInput","CameraInputHandled","CameraZoomResetting","CameraZoomReset"};
@@ -38,7 +40,15 @@ static void* Map(int id){return static_cast<void**>(Registry().data)[id];}
 static int FindMap(char const* name){auto& a=Registry();for(uint32_t i=0;i<a.size;++i){auto pm=static_cast<void**>(a.data)[i];if(!pm)continue;auto text=Se<char const*(*)(void const*)>(RVA_FixedStringText)(static_cast<Byte*>(pm)+SeAbi::MapName);if(text && strcmp(text,name)==0)return static_cast<int>(i);}return -1;}
 
 static bool ValidationBit(int id){auto bits=seBase+RegistryRva+SeAbi::RegistryBits;auto words=Field<uint64_t*>(bits,0);return (words[static_cast<unsigned>(id)/64] & (1ull<<(static_cast<unsigned>(id)%64)))!=0;}
-static bool CanPush(int id,void const* object){auto pm=Map(id);return NativeValidation::AllowProxy(ValidationBit(id),Field<int32_t>(pm,SeAbi::MapValidated),[&](){if(id==cameraId)++validationCalls[10];else if(id==inputId)++validationCalls[11];else if(id>=firstId && id<firstId+static_cast<int>(Count))++validationCalls[id-firstId];return Se<bool(*)(void*,void const*)>(RVA_ValidateMap)(pm,object);});}
+static bool CanPush(int id,void const* object){
+ auto pm=Map(id);
+ return NativeValidation::AllowProxy(ValidationBit(id),Field<int32_t>(pm,SeAbi::MapValidated),[&](){
+#if MAZZLE_BRIDGE_DIAGNOSTICS
+  if(id==cameraId)++validationCalls[10];else if(id==inputId)++validationCalls[11];else if(id>=firstId && id<firstId+static_cast<int>(Count))++validationCalls[id-firstId];
+#endif
+  return Se<bool(*)(void*,void const*)>(RVA_ValidateMap)(pm,object);
+ });
+}
 static void PushObject(void* L,int id,void const* ptr,uint64_t lifetime){if(!ptr || !CanPush(id,ptr)){PushNil(L);return;}auto value=EncodeNativeObject(ptr,id,lifetime);auto top=Field<TValue*>(L,SeAbi::LuaTop);*top=value;Field<TValue*>(L,SeAbi::LuaTop)=top+1;}
 static int ReadEntity(void* L,uint64_t,void const* value,void const*){auto p=Field<TValue*>(L,SeAbi::LuaTop);p->integer=*static_cast<int64_t const*>(value);reinterpret_cast<uint64_t*>(p)[1]=9ull|(8ull<<8);Field<TValue*>(L,SeAbi::LuaTop)=p+1;return 0;}
 static int ReadCamera(void* L,uint64_t lifetime,void const* value,void const*){PushObject(L,cameraId,*static_cast<void*const*>(value),lifetime);return 0;}
@@ -125,7 +135,9 @@ static Result Dispatch(unsigned i,void* state,void* L,void* camera,float dt,uint
  default:return {};}
 }
 static int Definition(void* L){if(!ready){PushNil(L);return 1;}auto camera=Se<void*(*)(void*,int,void const*)>(RVA_GetRawObject)(L,1,Map(cameraId));auto def=reinterpret_cast<void*(*)(void const*)>(gameBase+RVA_Definition)(camera);PushObject(L,definitionId,def,Field<uint64_t>(static_cast<Byte*>(L)-SeAbi::ExtraLifetimeBack,0));return 1;}
+#if MAZZLE_BRIDGE_DIAGNOSTICS
 static int ValidationStatus(void* L){if(!Se<int(*)(void*,int)>(RVA_CheckStack)(L,Count*3))return Se<int(*)(void*,char const*,...)>(RVA_LuaError)(L,"cannot reserve native validation status stack");for(unsigned i=0;i<Count;++i){PushInt(L,ready?Field<int32_t>(maps[i],SeAbi::MapValidated):-1);PushBool(L,ready&&ValidationBit(firstId+i));PushInt(L,validationCalls[i].load());}return Count*3;}
 static int Status(void* L){PushBool(L,ready);PushInt(L,firstId);PushInt(L,cameraId);PushInt(L,parentId);PushInt(L,vmCount.load());PushInt(L,inputId);PushInt(L,definitionId);return 7;}
+#endif
 }
 

@@ -1,0 +1,2 @@
+#pragma once
+#define MAZZLE_BOOTSTRAP_RESOURCE 101

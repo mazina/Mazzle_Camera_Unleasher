@@ -1,5 +1,6 @@
 #define NOMINMAX
 #include <windows.h>
+#include "bootstrap_resource.h"
 #include <tlhelp32.h>
 #include <bcrypt.h>
 #include <intrin.h>
@@ -19,12 +20,20 @@ using Byte=unsigned char;
 #pragma comment(lib,"bcrypt.lib")
 static Byte* seBase; static Byte* gameBase;
 static std::atomic<void*> clientExt{};
-static std::atomic<unsigned> generation{};
 static std::atomic<void*> installedState{}; static std::atomic<bool> enabled{false};
 static FILE* logFile;static SRWLOCK logLock=SRWLOCK_INIT;
+// Diagnostics are deliberately absent from normal builds, including counter updates.
+#ifndef MAZZLE_BRIDGE_DIAGNOSTICS
+#define MAZZLE_BRIDGE_DIAGNOSTICS 0
+#endif
+#if MAZZLE_BRIDGE_DIAGNOSTICS
+static std::atomic<unsigned> generation{};
 static std::atomic<unsigned long long> calls[10]{},errors{},prevented{},overrides{};
-// Retained statistics slot for previous tools; native pin accepts all threads, zero means none dropped.
 static constexpr unsigned long long wrongThread=0;
+#define BRIDGE_STAT(expression) do { expression; } while (false)
+#else
+#define BRIDGE_STAT(expression) ((void)0)
+#endif
 static std::string companion;
 extern "C" { std::atomic<uint8_t> KeyboardMovementOverride{0}; uint8_t const* KeyboardMovementControllerMode=nullptr; void KeyboardMovementModeBridge(); }
 static_assert(sizeof(KeyboardMovementOverride)==1);
@@ -62,15 +71,38 @@ static void InitializeLifetimePin(void* pin,void* L,void* stack){
 static OptionalInt Load(void* state,char const* text,char const* label){auto code=Borrow(text),name=Borrow(label);OptionalInt ret{};Se<OptionalInt*(*)(void*,OptionalInt*,SeString const*,SeString const*,int)>(RVA_LoadScript)(state,&ret,&code,&name,0);return ret;}
 static int KeyboardSet(void* L){if(At(L,1)->tag!=1)return Se<int(*)(void*,int,char const*)>(RVA_ArgError)(L,1,"boolean expected");if(keyboardAvailable)KeyboardMovementOverride.store(Boolean(L,1),std::memory_order_relaxed);PushBool(L,keyboardAvailable);return 1;}
 static int KeyboardGet(void* L){PushBool(L,KeyboardMovementOverride.load(std::memory_order_relaxed)!=0);return 1;}
+#if MAZZLE_BRIDGE_DIAGNOSTICS
 static int Statistics(void* L){for(auto& count:calls)PushInt(L,static_cast<int64_t>(count.load()));PushInt(L,static_cast<int64_t>(errors.load()));PushInt(L,static_cast<int64_t>(wrongThread));PushInt(L,generation.load());PushInt(L,static_cast<int64_t>(prevented.load()));PushInt(L,static_cast<int64_t>(overrides.load()));return 15;}
+#endif
 static void Bind(void* L,char const* name,int(*fn)(void*)){Se<void(*)(void*,char const*)>(RVA_PushString)(L,name);Se<void(*)(void*,int(*)(void*),int)>(RVA_PushClosure)(L,fn,0);Se<void(*)(void*,int)>(RVA_SetTable)(L,-3);}
 #include "native_payload.h"
 using InitializeFn=void(*)(void*);static InitializeFn nextInitialize;
-static void InitializeState(void* state){++NativePayload::vmCount;nextInitialize(state);installedState=state;enabled=false;void* L=Field<void*>(state,SeAbi::StateLua);int top=Top(L);if(!Se<int(*)(void*,int)>(RVA_CheckStack)(L,64)){Log("cannot reserve Lua stack");return;}auto ret=Load(state,"local b={}; Ext._Internal.MazzleNativeBridge=b; return b","NativeBridgeBindings");if(!ret.hasValue || ret.value!=1){SetTop(L,top);Log("binding table creation failed");return;}Bind(L,"SetKeyboardMovementOverride",KeyboardSet);Bind(L,"GetKeyboardMovementOverride",KeyboardGet);Bind(L,"GetCameraDefinition",NativePayload::Definition);Bind(L,"NativeStatistics",Statistics);Bind(L,"NativePayloadStatus",NativePayload::Status);Bind(L,"NativePayloadValidationStatus",NativePayload::ValidationStatus);SetTop(L,top);ret=Load(state,companion.c_str(),"NativeBridgeCompanion");if(ret.hasValue && ret.value==1){enabled=NativePayload::ready;Log("all native camera events registered before mod bootstrap");}else Log("companion initialization failed; native fallback retained");SetTop(L,top);}
+static void InitializeState(void* state){
+ ++NativePayload::vmCount;nextInitialize(state);installedState=state;enabled=false;
+ if(!NativePayload::ready){Log("native camera registration unavailable; bindings refused");return;}
+ void* L=Field<void*>(state,SeAbi::StateLua);int top=Top(L);
+ if(!Se<int(*)(void*,int)>(RVA_CheckStack)(L,64)){Log("cannot reserve Lua stack");return;}
+ auto failed=[&](){SetTop(L,top);Log("binding table creation failed");};
+ auto ret=Load(state,"local camera={}; rawset(Ext,'ClientCamera',camera); return camera","NativeCameraBindings");
+ if(!ret.hasValue || ret.value!=1){failed();return;}
+ Bind(L,"GetCameraDefinition",NativePayload::Definition);SetTop(L,top);
+ ret=Load(state,"return Ext.Input","NativeInputBindings");
+ if(!ret.hasValue || ret.value!=1){failed();return;}
+ Bind(L,"SetKeyboardMovementOverride",KeyboardSet);Bind(L,"GetKeyboardMovementOverride",KeyboardGet);SetTop(L,top);
+#if MAZZLE_BRIDGE_DIAGNOSTICS
+ ret=Load(state,"local diagnostics={}; Ext.ClientCamera._Diagnostics=diagnostics; return diagnostics","NativeCameraDiagnostics");
+ if(!ret.hasValue || ret.value!=1){failed();return;}
+ Bind(L,"NativeStatistics",Statistics);Bind(L,"NativePayloadStatus",NativePayload::Status);Bind(L,"NativePayloadValidationStatus",NativePayload::ValidationStatus);SetTop(L,top);
+#endif
+ ret=Load(state,companion.c_str(),"NativeBridgeCompanion");
+ if(ret.hasValue && ret.value==1){enabled=true;Log("all native camera events registered before mod bootstrap");}
+ else Log("companion initialization failed; native fallback retained");
+ SetTop(L,top);
+}
 using UpdateFn=void(*)(void*,void const*);static UpdateFn nextUpdate;
 static void Update(void* ext,void const* time){clientExt.store(ext);nextUpdate(ext,time);}
 using ShutdownFn=void(*)(void*);static ShutdownFn nextShutdown;
-static void Shutdown(void* ext){enabled=false;installedState=nullptr;clientExt.store(nullptr);KeyboardMovementOverride.store(0);++generation;Log("client VM shutdown: dispatch ref invalidated; keyboard override false");nextShutdown(ext);}
+static void Shutdown(void* ext){enabled=false;installedState=nullptr;clientExt.store(nullptr);KeyboardMovementOverride.store(0);BRIDGE_STAT(++generation);Log("client VM shutdown: dispatch ref invalidated; keyboard override false");nextShutdown(ext);}
 struct DispatchResult{bool successful=false;float value=0;bool hasNumber=false;bool prevented=false;uint16_t inputResult=0;};
 static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0,void* input=nullptr,double original=0,bool ignore=false,bool select=false){
  DispatchResult result;void* ext=clientExt.load();if(!ext)return result;
@@ -82,9 +114,9 @@ static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0
    alignas(8) Byte lifetime[SeAbi::PinBytes]{};alignas(8) Byte profiler[8]{};
    InitializeLifetimePin(lifetime,L,static_cast<Byte*>(state)+SeAbi::StateLifetimeStack);
    if(RVA_ProfilerCtor)Se<void(*)(void*,void*)>(RVA_ProfilerCtor)(profiler,state);
-   auto native=NativePayload::Dispatch(static_cast<unsigned>(event),state,L,camera,dt,entity,input,static_cast<float>(original),ignore,select,*Field<uint64_t*>(lifetime,SeAbi::PinCurrentReference));++calls[event];
+   auto native=NativePayload::Dispatch(static_cast<unsigned>(event),state,L,camera,dt,entity,input,static_cast<float>(original),ignore,select,*Field<uint64_t*>(lifetime,SeAbi::PinCurrentReference));BRIDGE_STAT(++calls[event]);
    result.successful=native.status==0;result.prevented=native.status==2;result.value=native.pitch;result.hasNumber=event==5;result.inputResult=native.input;
-   if(native.status==1){++errors;Log("native event dispatch failed; engine fallback retained");}
+   if(native.status==1){BRIDGE_STAT(++errors);Log("native event dispatch failed; engine fallback retained");}
    SetTop(L,top);if(RVA_ProfilerDtor)Se<void(*)(void*)>(RVA_ProfilerDtor)(profiler);Se<void(*)(void*)>(RVA_LifetimeDtor)(lifetime);
   }
  }
@@ -97,9 +129,9 @@ static void UpdatePitch(void* self,void* entity,void* camera,void const* time){a
 using UpdateZoomFn=void(*)(void*,void*,void*,void const*);static UpdateZoomFn nextZoom;
 static void Zoom(void* self,void* entity,void* view,void const* time){nextZoom(self,entity,view,time);Dispatch(4,Field<void*>(view,0x10),Field<float>(const_cast<void*>(time),0xc));}
 using PitchFn=float(*)(void*,bool,bool);static PitchFn nextPitch;
-static float Pitch(void* camera,bool ignore,bool select){float pitch=nextPitch(camera,ignore,select);auto result=Dispatch(5,camera,0,0,nullptr,pitch,ignore,select);if(result.successful && result.hasNumber && std::isfinite(result.value) && std::isfinite(static_cast<float>(result.value))){++overrides;return static_cast<float>(result.value);}return pitch;}
+static float Pitch(void* camera,bool ignore,bool select){float pitch=nextPitch(camera,ignore,select);auto result=Dispatch(5,camera,0,0,nullptr,pitch,ignore,select);if(result.successful && result.hasNumber && std::isfinite(result.value) && std::isfinite(static_cast<float>(result.value))){BRIDGE_STAT(++overrides);return static_cast<float>(result.value);}return pitch;}
 using InputFn=uint16_t*(*)(void*,uint16_t*,void*,void*);static InputFn nextInput;
-static uint16_t* Input(void* self,uint16_t* result,void* view,void* input){auto camera=Field<void*>(view,0x40);auto event=Dispatch(6,camera,0,0,input);if(event.prevented){*result=event.inputResult;++prevented;return result;}auto ret=nextInput(self,result,view,input);Dispatch(7,Field<void*>(view,0x40),0,0,input,*ret);return ret;}
+static uint16_t* Input(void* self,uint16_t* result,void* view,void* input){auto camera=Field<void*>(view,0x40);auto event=Dispatch(6,camera,0,0,input);if(event.prevented){*result=event.inputResult;BRIDGE_STAT(++prevented);return result;}auto ret=nextInput(self,result,view,input);Dispatch(7,Field<void*>(view,0x40),0,0,input,*ret);return ret;}
 using ResetZoomFn=void(*)(void*);static ResetZoomFn nextReset;
 static void ResetZoom(void* view){auto camera=Field<void*>(view,0x20);Dispatch(8,camera,0);nextReset(view);Dispatch(9,Field<void*>(view,0x20),0);}
 static std::wstring HashFile(wchar_t const* path){HANDLE file=CreateFileW(path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);if(file==INVALID_HANDLE_VALUE)return {};BCRYPT_ALG_HANDLE alg=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;Byte digest[32];if(BCryptOpenAlgorithmProvider(&alg,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0){CloseHandle(file);return {};}if(BCryptCreateHash(alg,&hash,nullptr,0,nullptr,0,0)<0){BCryptCloseAlgorithmProvider(alg,0);CloseHandle(file);return {};}Byte buf[65536];DWORD count;bool ok=true;for(;;){if(!ReadFile(file,buf,sizeof(buf),&count,nullptr)){ok=false;break;}if(!count)break;if(BCryptHashData(hash,buf,count,0)<0){ok=false;break;}}if(BCryptFinishHash(hash,digest,sizeof(digest),0)<0)ok=false;BCryptDestroyHash(hash);BCryptCloseAlgorithmProvider(alg,0);CloseHandle(file);if(!ok)return {};wchar_t hex[65];for(unsigned i=0;i<32;++i)swprintf_s(hex+i*2,3,L"%02x",digest[i]);return hex;}
@@ -162,7 +194,15 @@ static bool ResolveRuntime(HMODULE module,wchar_t const* modulePath){
  TLS_ContextOffset=result.contextOffset;
  char message[220];snprintf(message,sizeof(message),"SE symtab resolved; ms=%llu context=%zx registry=%zx statics=%zx finalize=%zx profiler=%zx",GetTickCount64()-begin,TLS_ContextOffset,RVA_StructRegistry,RVA_StaticStructs,RVA_FinalizeClass,RVA_ProfilerCtor);Log(message);return true;
 }
-static DWORD WINAPI Start(void* instance){logFile=_wfsopen(LR"(C:\Users\mazzin\AppData\Local\Larian Studios\Baldur's Gate 3\Script Extender\MazzleNativeCameraBridgeFull.log)",L"w",_SH_DENYNO);Log("full experimental standalone camera/input bridge starts");wchar_t path[32768];GetModuleFileNameW(static_cast<HMODULE>(instance),path,32768);std::wstring companionPath(path);companionPath=companionPath.substr(0,companionPath.find_last_of(L"\\/")+1)+L"bridge.lua";std::ifstream file(companionPath);companion.assign(std::istreambuf_iterator<char>(file),{});if(companion.empty()){Log("bridge.lua missing; no hooks installed");return 1;}HMODULE se=nullptr;for(unsigned i=0;i<600 && !se;++i){se=GetModuleHandleW(L"BG3ScriptExtender.dll");if(!se)Sleep(100);}if(!se){Log("SE missing");return 2;}GetModuleFileNameW(se,path,32768);if(!ResolveRuntime(se,path))return 3;GetModuleFileNameW(nullptr,path,32768);if(HashFile(path)!=GAME_HASH){Log("game hash mismatch; no hooks installed");return 4;}seBase=reinterpret_cast<Byte*>(se);gameBase=reinterpret_cast<Byte*>(GetModuleHandleW(nullptr));
+static bool LoadBootstrap(HMODULE module){
+ HRSRC resource=FindResourceW(module,MAKEINTRESOURCEW(MAZZLE_BOOTSTRAP_RESOURCE),MAKEINTRESOURCEW(10));
+ if(!resource)return false;
+ DWORD size=SizeofResource(module,resource);HGLOBAL loaded=LoadResource(module,resource);
+ auto bytes=loaded?static_cast<char const*>(LockResource(loaded)):nullptr;
+ if(!bytes||!size||std::memchr(bytes,0,size))return false;
+ companion.assign(bytes,size);return true;
+}
+static DWORD WINAPI Start(void* instance){logFile=_wfsopen(LR"(C:\Users\mazzin\AppData\Local\Larian Studios\Baldur's Gate 3\Script Extender\MazzleNativeCameraBridgeFull.log)",L"w",_SH_DENYNO);Log("full experimental standalone camera/input bridge starts");wchar_t path[32768];GetModuleFileNameW(static_cast<HMODULE>(instance),path,32768);if(!LoadBootstrap(static_cast<HMODULE>(instance))){Log("embedded Lua bootstrap missing or invalid; no hooks installed");return 1;}HMODULE se=nullptr;for(unsigned i=0;i<600 && !se;++i){se=GetModuleHandleW(L"BG3ScriptExtender.dll");if(!se)Sleep(100);}if(!se){Log("SE missing");return 2;}GetModuleFileNameW(se,path,32768);if(!ResolveRuntime(se,path))return 3;GetModuleFileNameW(nullptr,path,32768);if(HashFile(path)!=GAME_HASH){Log("game hash mismatch; no hooks installed");return 4;}seBase=reinterpret_cast<Byte*>(se);gameBase=reinterpret_cast<Byte*>(GetModuleHandleW(nullptr));
  Hook hooks[]={{RVA_TypeInitialize,true,reinterpret_cast<void**>(&NativePayload::nextTypeInitialize),reinterpret_cast<void*>(NativePayload::InitializeTypes),nullptr,0},{RVA_ResizeStructs,true,reinterpret_cast<void**>(&NativePayload::nextResize),reinterpret_cast<void*>(NativePayload::ResizeStatics),nullptr,0},{RVA_OnUpdate,true,reinterpret_cast<void**>(&nextUpdate),reinterpret_cast<void*>(Update),nullptr,0},{RVA_Shutdown,true,reinterpret_cast<void**>(&nextShutdown),reinterpret_cast<void*>(Shutdown),nullptr,0},{RVA_ClientInitialize,true,reinterpret_cast<void**>(&nextInitialize),reinterpret_cast<void*>(InitializeState),nullptr,0},{RVA_UpdateCamera,false,reinterpret_cast<void**>(&nextCamera),reinterpret_cast<void*>(Camera),Bytes_UpdateCamera,sizeof(Bytes_UpdateCamera)},{RVA_UpdatePitch,false,reinterpret_cast<void**>(&nextUpdatePitch),reinterpret_cast<void*>(UpdatePitch),Bytes_UpdatePitch,sizeof(Bytes_UpdatePitch)},{RVA_UpdateZoom,false,reinterpret_cast<void**>(&nextZoom),reinterpret_cast<void*>(Zoom),Bytes_UpdateZoom,sizeof(Bytes_UpdateZoom)},{RVA_Pitch,false,reinterpret_cast<void**>(&nextPitch),reinterpret_cast<void*>(Pitch),Bytes_Pitch,sizeof(Bytes_Pitch)},{RVA_Input,false,reinterpret_cast<void**>(&nextInput),reinterpret_cast<void*>(Input),Bytes_Input,sizeof(Bytes_Input)},{RVA_ResetZoom,false,reinterpret_cast<void**>(&nextReset),reinterpret_cast<void*>(ResetZoom),Bytes_ResetZoom,sizeof(Bytes_ResetZoom)}};
  for(auto& hook:hooks){auto target=(hook.se?seBase:gameBase)+hook.rva;if(hook.bytes && memcmp(target,hook.bytes,hook.size)){Log("hook prologue mismatch; no hooks installed");return 5;}*hook.original=target;}if(memcmp(gameBase+RVA_KeyboardGate,Bytes_KeyboardGate,sizeof(Bytes_KeyboardGate)) || memcmp(gameBase+RVA_Definition,Bytes_Definition,sizeof(Bytes_Definition))){Log("gate/getter prologue mismatch");return 6;}
  LONG result=DetourTransactionBegin();std::vector<HANDLE> opened;if(result==NO_ERROR && !EnlistThreads(opened))result=ERROR_ACCESS_DENIED;for(auto& hook:hooks)if(result==NO_ERROR)result=DetourAttach(hook.original,hook.hook);if(result==NO_ERROR)result=DetourTransactionCommit();else DetourTransactionAbort();for(HANDLE h:opened)CloseHandle(h);if(result==NO_ERROR)keyboardAvailable=InstallKeyboard();char message[140];snprintf(message,sizeof(message),"hooks result=%ld keyboard=%d; default override false",result,keyboardAvailable);Log(message);return result;

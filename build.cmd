@@ -6,15 +6,21 @@ if not defined BRIDGE_VCVARS set "BRIDGE_VCVARS=D:\BG3_Modding\Tools\VisualStudi
 if not defined BRIDGE_DETOURS_ROOT set "BRIDGE_DETOURS_ROOT=D:\BG3_Modding\SEDevelopment\dependencies\56654df550b6e855a04326b6c8ec7602ef23f46a1e11918d656ec33bdccf7b89\External\Detours"
 call "%BRIDGE_VCVARS%" -vcvars_ver=14.50.35717
 if errorlevel 1 exit /b %errorlevel%
-if not exist "%BRIDGE_TOOLS_DIR%\build" mkdir "%BRIDGE_TOOLS_DIR%\build"
+set "BRIDGE_BUILD_FOLDER=build"
+set "BRIDGE_DIAGNOSTIC_DEFINE=/DMAZZLE_BRIDGE_DIAGNOSTICS=0"
+if "%BRIDGE_DIAGNOSTICS%"=="1" (
+    set "BRIDGE_BUILD_FOLDER=build-diagnostics"
+    set "BRIDGE_DIAGNOSTIC_DEFINE=/DMAZZLE_BRIDGE_DIAGNOSTICS=1"
+)
+if not exist "%BRIDGE_TOOLS_DIR%\%BRIDGE_BUILD_FOLDER%" mkdir "%BRIDGE_TOOLS_DIR%\%BRIDGE_BUILD_FOLDER%"
 if errorlevel 1 exit /b %errorlevel%
-pushd "%BRIDGE_TOOLS_DIR%\build"
+pushd "%BRIDGE_TOOLS_DIR%\%BRIDGE_BUILD_FOLDER%"
 if errorlevel 1 exit /b %errorlevel%
 ml64 /nologo /c /Zi "%BRIDGE_PROJECT_DIR%keyboard.asm"
 if errorlevel 1 goto failed
-cl /nologo /std:c++20 /W4 /WX /O2 /Zi /MD /EHsc /LD /I"%BRIDGE_DETOURS_ROOT%\include" "%BRIDGE_PROJECT_DIR%bridge.cpp" keyboard.obj /link /OUT:MazzleNativeCameraBridgeFull.dll /PDB:MazzleNativeCameraBridgeFull.pdb "%BRIDGE_DETOURS_ROOT%\lib.X64\detours.lib"
+rc /nologo /i "%BRIDGE_PROJECT_DIR%." /fo bootstrap.res "%BRIDGE_PROJECT_DIR%bootstrap.rc"
 if errorlevel 1 goto failed
-copy /b /y "%BRIDGE_PROJECT_DIR%bridge.lua" "bridge.lua" >nul
+cl /nologo %BRIDGE_DIAGNOSTIC_DEFINE% /std:c++20 /W4 /WX /O2 /Zi /MD /EHsc /LD /I"%BRIDGE_DETOURS_ROOT%\include" "%BRIDGE_PROJECT_DIR%bridge.cpp" keyboard.obj bootstrap.res /link /OUT:MazzleNativeCameraBridgeFull.dll /PDB:MazzleNativeCameraBridgeFull.pdb "%BRIDGE_DETOURS_ROOT%\lib.X64\detours.lib"
 if errorlevel 1 goto failed
 popd
 exit /b 0
