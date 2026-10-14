@@ -24,6 +24,7 @@ using Byte=unsigned char;
 static Byte* seBase; static Byte* gameBase;
 static std::atomic<void*> clientExt{};
 static std::atomic<void*> installedState{}; static std::atomic<bool> enabled{false};
+static std::atomic<bool> dispatchFailureReported{false};
 static FILE* logFile;static SRWLOCK logLock=SRWLOCK_INIT;
 // Diagnostics are deliberately absent from normal builds, including counter updates.
 #ifndef MAZZLE_BRIDGE_DIAGNOSTICS
@@ -40,7 +41,7 @@ static constexpr unsigned long long wrongThread=0;
 static std::string companion;
 extern "C" { std::atomic<uint8_t> KeyboardMovementOverride{0}; uint8_t const* KeyboardMovementControllerMode=nullptr; void KeyboardMovementModeBridge(); }
 static_assert(sizeof(KeyboardMovementOverride)==1);
-static bool keyboardAvailable;
+static std::atomic<bool> keyboardAvailable{false};
 static void Log(char const* message){AcquireSRWLockExclusive(&logLock);if(logFile){fprintf(logFile,"%llu %s\n",GetTickCount64(),message);fflush(logFile);}ReleaseSRWLockExclusive(&logLock);}
 static bool OpenLog(){
  PWSTR appData=nullptr;
@@ -99,10 +100,12 @@ static int KeyboardGet(void* L){PushBool(L,KeyboardMovementOverride.load(std::me
 static int Statistics(void* L){for(auto& count:calls)PushInt(L,static_cast<int64_t>(count.load()));PushInt(L,static_cast<int64_t>(errors.load()));PushInt(L,static_cast<int64_t>(wrongThread));PushInt(L,generation.load());PushInt(L,static_cast<int64_t>(prevented.load()));PushInt(L,static_cast<int64_t>(overrides.load()));return 15;}
 #endif
 static void Bind(void* L,char const* name,int(*fn)(void*)){Se<void(*)(void*,char const*)>(RVA_PushString)(L,name);Se<void(*)(void*,int(*)(void*),int)>(RVA_PushClosure)(L,fn,0);Se<void(*)(void*,int)>(RVA_SetTable)(L,-3);}
+#include "input_bindings.h"
 #include "native_payload.h"
 using InitializeFn=void(*)(void*);static InitializeFn nextInitialize;
 static void InitializeState(void* state){
  ++NativePayload::vmCount;nextInitialize(state);installedState=state;enabled=false;
+ dispatchFailureReported.store(false,std::memory_order_relaxed);
  if(!NativePayload::ready){ReportFailure("native camera registration unavailable; bindings refused");return;}
  void* L=Field<void*>(state,SeAbi::StateLua);int top=Top(L);
  if(!Se<int(*)(void*,int)>(RVA_CheckStack)(L,64)){ReportFailure("cannot reserve Lua stack");return;}
@@ -113,6 +116,9 @@ static void InitializeState(void* state){
  ret=Load(state,"return Ext.Input","NativeInputBindings");
  if(!ret.hasValue || ret.value!=1){failed();return;}
  Bind(L,"SetKeyboardMovementOverride",KeyboardSet);Bind(L,"GetKeyboardMovementOverride",KeyboardGet);SetTop(L,top);
+ ret=Load(state,"return Ext.Input","NativeMovementBindingSetup");
+ if(!ret.hasValue || ret.value!=1){failed();return;}
+ Bind(L,"SyncKeyboardMovementBindings",InputBindings::Synchronize);Bind(L,"GetKeyboardMovementBindings",InputBindings::Snapshot);Bind(L,"GetKeyboardMovementBindingVersion",InputBindings::Revision);SetTop(L,top);
 #if MAZZLE_BRIDGE_DIAGNOSTICS
  ret=Load(state,"local diagnostics={}; Ext.ClientCamera._Diagnostics=diagnostics; return diagnostics","NativeCameraDiagnostics");
  if(!ret.hasValue || ret.value!=1){failed();return;}
@@ -126,7 +132,7 @@ static void InitializeState(void* state){
 using UpdateFn=void(*)(void*,void const*);static UpdateFn nextUpdate;
 static void Update(void* ext,void const* time){clientExt.store(ext);nextUpdate(ext,time);}
 using ShutdownFn=void(*)(void*);static ShutdownFn nextShutdown;
-static void Shutdown(void* ext){enabled=false;installedState=nullptr;clientExt.store(nullptr);KeyboardMovementOverride.store(0);BRIDGE_STAT(++generation);Log("client VM shutdown: dispatch ref invalidated; keyboard override false");nextShutdown(ext);}
+static void Shutdown(void* ext){enabled=false;InputBindings::Shutdown();installedState=nullptr;clientExt.store(nullptr);KeyboardMovementOverride.store(0);BRIDGE_STAT(++generation);Log("client VM shutdown: dispatch ref invalidated; keyboard override false");nextShutdown(ext);KeyboardMovementOverride.store(0);}
 struct DispatchResult{bool successful=false;float value=0;bool hasNumber=false;bool prevented=false;uint16_t inputResult=0;};
 static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0,void* input=nullptr,double original=0,bool ignore=false,bool select=false){
  DispatchResult result;void* ext=clientExt.load();if(!ext)return result;
@@ -140,7 +146,7 @@ static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0
    if(RVA_ProfilerCtor)Se<void(*)(void*,void*)>(RVA_ProfilerCtor)(profiler,state);
    auto native=NativePayload::Dispatch(static_cast<unsigned>(event),state,L,camera,dt,entity,input,static_cast<float>(original),ignore,select,*Field<uint64_t*>(lifetime,SeAbi::PinCurrentReference));BRIDGE_STAT(++calls[event]);
    result.successful=native.status==0;result.prevented=native.status==2;result.value=native.pitch;result.hasNumber=event==5;result.inputResult=native.input;
-   if(native.status==1){BRIDGE_STAT(++errors);Log("native event dispatch failed; engine fallback retained");}
+   if(native.status==1){BRIDGE_STAT(++errors);if(!dispatchFailureReported.exchange(true,std::memory_order_relaxed))Log("native event dispatch failed; engine fallback retained; further failures suppressed until the next client VM");}
    SetTop(L,top);if(RVA_ProfilerDtor)Se<void(*)(void*)>(RVA_ProfilerDtor)(profiler);Se<void(*)(void*)>(RVA_LifetimeDtor)(lifetime);
   }
  }
@@ -159,8 +165,8 @@ static uint16_t* Input(void* self,uint16_t* result,void* view,void* input){auto 
 using ResetZoomFn=void(*)(void*);static ResetZoomFn nextReset;
 static void ResetZoom(void* view){auto camera=Field<void*>(view,0x20);Dispatch(8,camera,0);nextReset(view);Dispatch(9,Field<void*>(view,0x20),0);}
 static void* AllocateRelay(uintptr_t site){SYSTEM_INFO info;GetSystemInfo(&info);auto granularity=static_cast<uintptr_t>(info.dwAllocationGranularity);auto lower=site>0x7fff0000ull?site-0x7fff0000ull:granularity;auto upper=site+0x7fff0000ull;auto address=(lower+granularity-1)&~(granularity-1);while(address<upper){MEMORY_BASIC_INFORMATION region;if(!VirtualQuery(reinterpret_cast<void*>(address),&region,sizeof(region)))break;auto end=reinterpret_cast<uintptr_t>(region.BaseAddress)+region.RegionSize;if(region.State==MEM_FREE && end-address>=info.dwPageSize){if(auto relay=VirtualAlloc(reinterpret_cast<void*>(address),info.dwPageSize,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE))return relay;}if(end<=address)break;address=(end+granularity-1)&~(granularity-1);}return nullptr;}
-static bool InstallKeyboard(){auto site=gameBase+RVA_KeyboardGate;auto relay=static_cast<Byte*>(AllocateRelay(reinterpret_cast<uintptr_t>(site)));if(!relay)return false;int32_t modeOffset;memcpy(&modeOffset,site+2,4);KeyboardMovementControllerMode=site+7+modeOffset;Byte jump[]={0xff,0x25,0,0,0,0};memcpy(relay,jump,6);auto bridge=&KeyboardMovementModeBridge;memcpy(relay+6,&bridge,8);DWORD old;if(!VirtualProtect(relay,14,PAGE_EXECUTE_READ,&old))return false;FlushInstructionCache(GetCurrentProcess(),relay,14);auto displacement=reinterpret_cast<intptr_t>(relay)-reinterpret_cast<intptr_t>(site+5);if(displacement<INT32_MIN || displacement>INT32_MAX)return false;Byte replacement[]={0xe8,0,0,0,0,0x84,0xc0};int32_t rel32=static_cast<int32_t>(displacement);memcpy(replacement+1,&rel32,4);if(!VirtualProtect(site,7,PAGE_EXECUTE_READWRITE,&old))return false;memcpy(site,replacement,7);DWORD ignored;VirtualProtect(site,7,old,&ignored);FlushInstructionCache(GetCurrentProcess(),site,7);return true;}
-static bool EnlistThreads(std::vector<HANDLE>& opened){HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(snap==INVALID_HANDLE_VALUE)return false;THREADENTRY32 entry{sizeof(entry)};bool ok=true;if(Thread32First(snap,&entry))do{if(entry.th32OwnerProcessID==GetCurrentProcessId() && entry.th32ThreadID!=GetCurrentThreadId()){HANDLE h=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_SET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,entry.th32ThreadID);if(!h){ok=false;break;}opened.push_back(h);if(DetourUpdateThread(h)!=NO_ERROR){ok=false;break;}}}while(Thread32Next(snap,&entry));CloseHandle(snap);return ok;}
+#include "call_patch.h"
+static bool EnlistThreads(std::vector<HANDLE>& opened){HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(snap==INVALID_HANDLE_VALUE)return false;THREADENTRY32 entry{sizeof(entry)};bool ok=true;if(Thread32First(snap,&entry))do{if(entry.th32OwnerProcessID==GetCurrentProcessId() && entry.th32ThreadID!=GetCurrentThreadId()){HANDLE h=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_SET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,entry.th32ThreadID);if(!h){ok=false;break;}if(SuspendThread(h)==static_cast<DWORD>(-1)){CloseHandle(h);ok=false;break;}opened.push_back(h);if(DetourUpdateThread(h)!=NO_ERROR){ok=false;break;}}}while(Thread32Next(snap,&entry));CloseHandle(snap);return ok;}
 struct Hook{uintptr_t rva;bool se;void** original;void* hook;Byte const* bytes;size_t size;};
 static bool ResolveRuntime(HMODULE module,wchar_t const* modulePath){
  using namespace RuntimeResolver;
@@ -223,6 +229,9 @@ static bool ResolveGame(HMODULE module){
  for(unsigned i=0;i<nt->FileHeader.NumberOfSections;++i)image.sections.push_back({section[i].VirtualAddress,std::max(section[i].Misc.VirtualSize,section[i].SizeOfRawData),section[i].Characteristics});
  GameResolver::Resolution result;std::string why;auto begin=GetTickCount64();
  if(!GameResolver::Resolve(image,result,why)){ReportFailure("game function mapping refused before hooks: "+why);return false;}
+ if(!InputBindingResolver::Resolve(image,InputBindings::addresses,why)){
+  ReportStartup(("WARNING: automatic movement binding setup unavailable: "+why).c_str());InputBindings::addresses={};
+ }
  RVA_UpdateCamera=result.rva[static_cast<size_t>(GameResolver::Id::UpdateCamera)];
  RVA_UpdatePitch=result.rva[static_cast<size_t>(GameResolver::Id::UpdatePitch)];
  RVA_UpdateZoom=result.rva[static_cast<size_t>(GameResolver::Id::UpdateZoom)];
@@ -257,7 +266,35 @@ static DWORD WINAPI Start(void* instance){
  seBase=reinterpret_cast<Byte*>(se);gameBase=reinterpret_cast<Byte*>(game);
  Hook hooks[]={{RVA_TypeInitialize,true,reinterpret_cast<void**>(&NativePayload::nextTypeInitialize),reinterpret_cast<void*>(NativePayload::InitializeTypes),nullptr,0},{RVA_ResizeStructs,true,reinterpret_cast<void**>(&NativePayload::nextResize),reinterpret_cast<void*>(NativePayload::ResizeStatics),nullptr,0},{RVA_OnUpdate,true,reinterpret_cast<void**>(&nextUpdate),reinterpret_cast<void*>(Update),nullptr,0},{RVA_Shutdown,true,reinterpret_cast<void**>(&nextShutdown),reinterpret_cast<void*>(Shutdown),nullptr,0},{RVA_ClientInitialize,true,reinterpret_cast<void**>(&nextInitialize),reinterpret_cast<void*>(InitializeState),nullptr,0},{RVA_UpdateCamera,false,reinterpret_cast<void**>(&nextCamera),reinterpret_cast<void*>(Camera),Bytes_UpdateCamera,sizeof(Bytes_UpdateCamera)},{RVA_UpdatePitch,false,reinterpret_cast<void**>(&nextUpdatePitch),reinterpret_cast<void*>(UpdatePitch),Bytes_UpdatePitch,sizeof(Bytes_UpdatePitch)},{RVA_UpdateZoom,false,reinterpret_cast<void**>(&nextZoom),reinterpret_cast<void*>(Zoom),Bytes_UpdateZoom,sizeof(Bytes_UpdateZoom)},{RVA_Pitch,false,reinterpret_cast<void**>(&nextPitch),reinterpret_cast<void*>(Pitch),Bytes_Pitch,sizeof(Bytes_Pitch)},{RVA_Input,false,reinterpret_cast<void**>(&nextInput),reinterpret_cast<void*>(Input),Bytes_Input,sizeof(Bytes_Input)},{RVA_ResetZoom,false,reinterpret_cast<void**>(&nextReset),reinterpret_cast<void*>(ResetZoom),Bytes_ResetZoom,sizeof(Bytes_ResetZoom)}};
  for(auto& hook:hooks){auto target=(hook.se?seBase:gameBase)+hook.rva;if(hook.bytes && memcmp(target,hook.bytes,hook.size)){ReportFailure("hook prologue mismatch; no hooks installed");return 5;}*hook.original=target;}
- LONG result=DetourTransactionBegin();std::vector<HANDLE> opened;if(result==NO_ERROR && !EnlistThreads(opened))result=ERROR_ACCESS_DENIED;for(auto& hook:hooks)if(result==NO_ERROR)result=DetourAttach(hook.original,hook.hook);if(result==NO_ERROR)result=DetourTransactionCommit();else DetourTransactionAbort();for(HANDLE h:opened)CloseHandle(h);if(result==NO_ERROR)keyboardAvailable=InstallKeyboard();char message[140];snprintf(message,sizeof(message),"hooks result=%ld keyboard=%d; default override false",result,keyboardAvailable);Log(message);if(result!=NO_ERROR)ReportFailure("hook installation failed with Windows error "+std::to_string(result));else if(!keyboardAvailable)ReportStartup("WARNING: keyboard movement hook failed; WASD is unavailable.");return result;
+ CallPatch keyboard,pathCall,remapCall;auto site=gameBase+RVA_KeyboardGate;
+ int32_t modeOffset;memcpy(&modeOffset,site+2,4);KeyboardMovementControllerMode=site+7+modeOffset;
+ bool keyboardPrepared=keyboard.Prepare(site,reinterpret_cast<void*>(&KeyboardMovementModeBridge),true);
+ auto const& bindings=InputBindings::addresses;bool bindingsPrepared=false;
+ if(bindings.reload){
+  InputBindings::reload=reinterpret_cast<InputBindings::ReloadFn>(gameBase+bindings.reload);
+  InputBindings::nextPath=reinterpret_cast<InputBindings::PathFn>(gameBase+bindings.pathTarget);
+  InputBindings::nextRemap=reinterpret_cast<InputBindings::RemapFn>(gameBase+bindings.remapTarget);
+  bindingsPrepared=pathCall.Prepare(gameBase+bindings.pathCall,reinterpret_cast<void*>(InputBindings::CapturePath)) && remapCall.Prepare(gameBase+bindings.remapCall,reinterpret_cast<void*>(InputBindings::AfterRemap));
+ }
+ LONG result=DetourTransactionBegin();std::vector<HANDLE> opened;
+ if(result==NO_ERROR && !EnlistThreads(opened))result=ERROR_ACCESS_DENIED;
+ for(auto& hook:hooks)if(result==NO_ERROR)result=DetourAttach(hook.original,hook.hook);
+ bool keyboardInstalled=false,bindingsInstalled=false;
+ if(result==NO_ERROR){
+  if(keyboardPrepared){keyboardInstalled=keyboard.Apply();if(!keyboardInstalled)keyboard.Rollback();}
+  if(bindingsPrepared){bindingsInstalled=pathCall.Apply() && remapCall.Apply();if(!bindingsInstalled){remapCall.Rollback();pathCall.Rollback();}}
+  result=DetourTransactionCommit();
+ }else DetourTransactionAbort();
+ if(result!=NO_ERROR){remapCall.Rollback();pathCall.Rollback();keyboard.Rollback();}
+ keyboardAvailable.store(result==NO_ERROR && keyboardInstalled);InputBindings::available=result==NO_ERROR && bindingsInstalled;
+ // Our extra suspension keeps raw CALL patches protected even when Detours
+ // resumes its own enlisted threads on commit or abort.
+ for(HANDLE h:opened){ResumeThread(h);CloseHandle(h);}
+ keyboard.Discard();pathCall.Discard();remapCall.Discard();
+ char message[160];snprintf(message,sizeof(message),"hooks result=%ld keyboard=%d bindings=%d; default override false",result,keyboardAvailable.load(),InputBindings::available);Log(message);
+ if(result!=NO_ERROR)ReportFailure("hook installation failed with Windows error "+std::to_string(result));
+ else{if(!keyboardAvailable.load())ReportStartup("WARNING: keyboard movement hook failed; WASD is unavailable.");if(!InputBindings::available)ReportStartup("WARNING: movement binding hooks failed; automatic WASD setup is unavailable.");}
+ return result;
 }
 BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(instance);HANDLE thread=CreateThread(nullptr,0,Start,instance,0,nullptr);if(thread)CloseHandle(thread);else ReportFailure("cannot start the bridge initialization thread");}return TRUE;}
 

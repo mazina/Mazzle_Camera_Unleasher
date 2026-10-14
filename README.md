@@ -10,7 +10,7 @@ Run build.cmd from this project. The verified build uses x64 MSVC 14.50.35717 an
 
 Outputs go to C:\Users\mazzin\Desktop\BG3_Modding\_MyProjects\_Codex_Tools_Research\Mazzle_Native_Camera_Bridge\build (the canonical tools junction resolves to D:\BG3_Modding\Tools\Mazzle_Native_Camera_Bridge). The output consists of Camera_Unleasher.dll, symbols, and build intermediates. Run verify.cmd in that project's tools directory for the existing offline checks. Building does not deploy to BG3.
 
-The build paths can be set with BRIDGE_TOOLS_DIR, BRIDGE_VCVARS, and BRIDGE_DETOURS_ROOT; the compiler version remains pinned.
+The build paths can be set with BRIDGE_TOOLS_DIR, BRIDGE_VCVARS, BRIDGE_DETOURS_ROOT, and BRIDGE_JSON_ROOT; the compiler version remains pinned. RapidJSON headers come from the same immutable SE dependency bundle as Detours. They are compiled into the DLL; no additional runtime file is required.
 
 Normal builds compile with MAZZLE_BRIDGE_DIAGNOSTICS=0. To intentionally collect statistics for investigation, set BRIDGE_DIAGNOSTICS=1 before running build.cmd. That build compiles with MAZZLE_BRIDGE_DIAGNOSTICS=1 and writes to build-diagnostics instead of build, preserving the normal artifact. It exposes NativeStatistics, NativePayloadStatus, and NativePayloadValidationStatus under Ext.ClientCamera._Diagnostics. No statistics variables or updates are compiled into normal builds; functional startup/reset safety state remains. There is no user-facing setting or runtime toggle.
 
@@ -30,11 +30,17 @@ alternate log destination is used. Console reporting does not require successful
 SE symbol resolution and adds no camera/input-frame work. If the native mod
 loader never loads the DLL, the bridge cannot print a status message.
 
-The game resolver passes offline against the current local Steam DirectX 11 and Vulkan executables, which have different function addresses. The revised DLL also passes live startup on Steam DirectX 11: all eight game targets resolve, camera hooks and the keyboard gate install, all ten native events are present, and Camera Unleashed becomes ready. GOG activation still needs confirmation from a player using that build; successful SE resolution alone does not establish that the game function signatures matched.
+Successful camera/input dispatch performs no logging. A native dispatch failure
+is logged at most once per client Lua VM, with further identical failures
+suppressed until that VM is replaced or reset.
+
+The game resolver passes offline against the current local Steam DirectX 11 and Vulkan executables, which have different function addresses. The revised DLL also passes live startup on Steam DirectX 11: all eight game targets resolve, camera hooks and the keyboard gate install, all ten native events are present, and Camera Unleashed becomes ready. The user also confirmed activation on the affected player's different executable; that player's renderer and store were not independently established.
 
 ## Lua interface
 
 See [NATIVE_BRIDGE_API.md](NATIVE_BRIDGE_API.md). All ten camera/input event payloads and their borrowed camera/input/value objects are native SE objects. The public camera namespace is Ext.ClientCamera: its events use standard :Subscribe/:Unsubscribe methods, and GetCameraDefinition returns the existing native CameraGlobalSwitches type. WASD functions live only in Ext.Input.
+
+Camera Unleashed requests movement binding setup once at gameplay initialization. This uses native WASD's policy: copy the four Camera movement bindings into CharacterMove bindings, including the controller Y-axis inversion, then reload only when the file changes. Existing independent CharacterMove direction bindings are replaced by the corresponding camera bindings; camera bindings and all unrelated preferences are preserved. Leaving the keybinding menu repeats setup while the client VM uses it. The actual game-selected player-one config path is captured, including custom profile roots. Cached binding snapshots let CU follow the configured movement/rotation keys without per-frame file access. Setup failure reports a warning and CU leaves movement inactive; explicit WASD commands retry setup after a fault. Missing setup mappings do not disable camera events.
 
 ## Research and validation
 
