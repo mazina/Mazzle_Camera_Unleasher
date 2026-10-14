@@ -45,7 +45,6 @@ inline uintptr_t RVA_FinalizeClass=0;
 inline uintptr_t RVA_TLSIndex=0;
 inline uintptr_t RVA_StructRegistry=0;
 inline uintptr_t RVA_StaticStructs=0;
-constexpr wchar_t GAME_HASH[]=L"e899c67cb90b9c6b0f052e3f758ba8615bc2012e52561c2af2e6a1e06ef61a2f";
 inline size_t TLS_ContextOffset=0;
 inline uintptr_t RVA_ProfilerCtor=0,RVA_ProfilerDtor=0;
 namespace SeAbi {

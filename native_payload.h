@@ -102,18 +102,18 @@ template<size_t... I>static void AllMaps(std::index_sequence<I...>){(RegisterMap
 template<size_t... I>static void AllTypes(std::index_sequence<I...>){(RegisterType<I>(),...);}
 static void InitializeTypes(void* repository){
  auto& reg=Registry();auto& st=Statics();
- if(vmCount.load() || reg.size==0 || reg.size+Count>UINT16_MAX || st.size!=0 || firstId>=0){Log("native events: late/duplicate startup refused");nextTypeInitialize(repository);return;}
+ if(vmCount.load() || reg.size==0 || reg.size+Count>UINT16_MAX || st.size!=0 || firstId>=0){ReportFailure("native events: late/duplicate startup refused");nextTypeInitialize(repository);return;}
  parentId=FindMap("lua::EventBase");cameraId=FindMap("ecl::GameCameraBehavior");inputId=FindMap("input::InputEvent");definitionId=FindMap("CameraGlobalSwitches");
- if(parentId<0 || cameraId<0 || inputId<0 || definitionId<0){Log("native events: required official maps missing");nextTypeInitialize(repository);return;}
+ if(parentId<0 || cameraId<0 || inputId<0 || definitionId<0){ReportFailure("native events: required official maps missing");nextTypeInitialize(repository);return;}
  floatSetter=FindSetter(Map(cameraId),"ZoomSpeed");resultSetter=FindSetter(Map(inputId),"DeviceId");
- if(!floatSetter || !resultSetter || !FindValidator(Map(cameraId),"Trigger") || !FindValidator(Map(cameraId),"ZoomSpeed") || !FindValidator(Map(cameraId),"PlayerInControl") || !FindValidator(Map(inputId),"DeviceId")){Log("native events: official scalar accessors missing");nextTypeInitialize(repository);return;}
- firstId=static_cast<int>(reg.size);auto newSize=reg.size+Count;auto buffer=Se<void*(*)(size_t)>(RVA_Alloc)(static_cast<size_t>(newSize)*sizeof(void*));if(!buffer){firstId=-1;nextTypeInitialize(repository);return;}
+ if(!floatSetter || !resultSetter || !FindValidator(Map(cameraId),"Trigger") || !FindValidator(Map(cameraId),"ZoomSpeed") || !FindValidator(Map(cameraId),"PlayerInControl") || !FindValidator(Map(inputId),"DeviceId")){ReportFailure("native events: official scalar accessors missing");nextTypeInitialize(repository);return;}
+ firstId=static_cast<int>(reg.size);auto newSize=reg.size+Count;auto buffer=Se<void*(*)(size_t)>(RVA_Alloc)(static_cast<size_t>(newSize)*sizeof(void*));if(!buffer){ReportFailure("native event registry allocation failed");firstId=-1;nextTypeInitialize(repository);return;}
  memcpy(buffer,reg.data,static_cast<size_t>(reg.size)*sizeof(void*));memset(static_cast<void**>(buffer)+reg.size,0,Count*sizeof(void*));
  auto bits=seBase+RegistryRva+SeAbi::RegistryBits;auto required=(newSize+63u)&~63u;auto oldBitSize=Field<uint32_t>(bits,SeAbi::BitsetSize);void* newBits=nullptr;
- if(oldBitSize<required){newBits=Se<void*(*)(size_t)>(RVA_Alloc)(required/8);if(!newBits){Se<void(*)(void*)>(RVA_Free)(buffer);firstId=-1;nextTypeInitialize(repository);return;}memset(newBits,0,required/8);memcpy(newBits,Field<void*>(bits,0),oldBitSize/8);}
+ if(oldBitSize<required){newBits=Se<void*(*)(size_t)>(RVA_Alloc)(required/8);if(!newBits){ReportFailure("native event validation-bit allocation failed");Se<void(*)(void*)>(RVA_Free)(buffer);firstId=-1;nextTypeInitialize(repository);return;}memset(newBits,0,required/8);memcpy(newBits,Field<void*>(bits,0),oldBitSize/8);}
  auto old=reg.data;reg.data=buffer;reg.capacity=newSize;reg.size=newSize;Se<void(*)(void*)>(RVA_Free)(old);
  if(newBits){auto oldBits=Field<void*>(bits,0);Field<void*>(bits,0)=newBits;Field<uint32_t>(bits,SeAbi::BitsetSize)=required;Se<void(*)(void*)>(RVA_Free)(oldBits);}
- early=true;AllMaps(std::make_index_sequence<Count>{});nextTypeInitialize(repository);if(st.size!=reg.size){Log("native events: static registry mismatch; dispatch refused");return;}
+ early=true;AllMaps(std::make_index_sequence<Count>{});nextTypeInitialize(repository);if(st.size!=reg.size){ReportFailure("native events: static registry mismatch; dispatch refused");return;}
  AllTypes(std::make_index_sequence<Count>{});ready=true;Log("native events: all ten registered before type Finalize and Lua VMs");
 }
 struct Result{int status=1;float pitch=0;uint16_t input=0;};

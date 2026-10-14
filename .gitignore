@@ -1,5 +1,6 @@
 .vs/
 .vscode/
+.command_harness_relay/
 *.obj
 *.pdb
 *.ilk

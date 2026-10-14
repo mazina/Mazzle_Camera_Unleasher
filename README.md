@@ -8,7 +8,7 @@ This independent source repository owns the native plugin, embedded Lua bootstra
 
 Run build.cmd from this project. The verified build uses x64 MSVC 14.50.35717 and the immutable Detours dependency already installed under D:\BG3_Modding\SEDevelopment\dependencies.
 
-Outputs go to C:\Users\mazzin\Desktop\BG3_Modding\_MyProjects\_Codex_Tools_Research\Mazzle_Native_Camera_Bridge\build (the canonical tools junction resolves to D:\BG3_Modding\Tools\Mazzle_Native_Camera_Bridge). The output consists of MazzleNativeCameraBridgeFull.dll, symbols, and build intermediates. Run verify.cmd in that project's tools directory for the existing offline checks. Building does not deploy to BG3.
+Outputs go to C:\Users\mazzin\Desktop\BG3_Modding\_MyProjects\_Codex_Tools_Research\Mazzle_Native_Camera_Bridge\build (the canonical tools junction resolves to D:\BG3_Modding\Tools\Mazzle_Native_Camera_Bridge). The output consists of Camera_Unleasher.dll, symbols, and build intermediates. Run verify.cmd in that project's tools directory for the existing offline checks. Building does not deploy to BG3.
 
 The build paths can be set with BRIDGE_TOOLS_DIR, BRIDGE_VCVARS, and BRIDGE_DETOURS_ROOT; the compiler version remains pinned.
 
@@ -16,9 +16,21 @@ Normal builds compile with MAZZLE_BRIDGE_DIAGNOSTICS=0. To intentionally collect
 
 ## Runtime
 
-The native mod loader loads the DLL from BG3's bin\NativeMods. Only the DLL is required there. The build embeds editable source bridge.lua as a Windows RCDATA resource; Lua bootstrap changes require rebuilding the DLL. No external Lua bootstrap is read at runtime. Remove a legacy NativeMods/bridge.lua when upgrading. The plugin retains the game executable hash guard. It resolves native SE functions from the matching BG3ScriptExtender.symtab beside the loaded SE DLL, then verifies supported instruction/layout forms and helper/global relationships before installing any hooks. Missing, ambiguous, stale, or unsupported mappings refuse activation. The normal updater cache ships both files together.
+The native mod loader loads the DLL from BG3's bin\NativeMods. Only the DLL is required there. The build embeds editable source bridge.lua as a Windows RCDATA resource; Lua bootstrap changes require rebuilding the DLL. No external Lua bootstrap is read at runtime. Remove a legacy NativeMods/bridge.lua when upgrading. The game camera/WASD addresses are resolved once from the same instruction patterns used by the SE patch. There is no game-executable hash whitelist; mappings must identify unique executable targets with the supported entry instructions and valid data references. It resolves native SE functions from the matching BG3ScriptExtender.symtab beside the loaded SE DLL, then verifies supported instruction/layout forms and helper/global relationships before installing any hooks. Missing, ambiguous, stale, or unsupported mappings refuse activation. The normal updater cache ships both files together.
 
-The active normal build is 34678B65 with B90BB9 Lua bootstrap embedded, live-validated on published Release C5E9041A (package73f6e7e, source af85fd2). The updater remains default Release (`{}`), without a pin. This build also passes offline resolver checks against published Devel791C11 (package8d13e4cd, source45f32c1); its namespace changes have not been live-tested on Devel. The previous unchanged 00F341 build was live-tested on both published builds. There is no SE DLL hash whitelist or address profile. Recognized native instruction forms remain conservative: another compiler/body or unsupported ABI is rejected pending review; this is not universal compatibility.
+Before the startup-reporting and game-address resolver changes, normal build 34678B65 with B90BB9 Lua bootstrap embedded was live-validated on published Release C5E9041A (package73f6e7e, source af85fd2). The updater remains default Release (`{}`), without a pin. The current SE resolver passes offline checks against that Release and published Devel791C11 (package8d13e4cd, source45f32c1); its namespace changes have not been live-tested on Devel. The previous unchanged 00F341 build was live-tested on both published builds. There is no SE DLL hash whitelist or address profile. Recognized native instruction forms remain conservative: another compiler/body or unsupported ABI is rejected pending review; this is not universal compatibility.
+
+Startup status is printed to the existing SE console, when enabled, with the
+`[Camera Unleasher]` prefix. `STARTING` confirms the DLL is running; `LOADED`
+confirms the client camera/input API initialized; `FAILED` includes the failure
+reason. A keyboard-hook failure is reported separately as `WASD is unavailable`.
+The file log stays in `%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender\MazzleNativeCameraBridgeFull.log`, resolved using Windows' LocalAppData known folder.
+If that directory or file cannot be opened, console reporting still works; no
+alternate log destination is used. Console reporting does not require successful
+SE symbol resolution and adds no camera/input-frame work. If the native mod
+loader never loads the DLL, the bridge cannot print a status message.
+
+The game resolver passes offline against the current local Steam DirectX 11 and Vulkan executables, which have different function addresses. The revised DLL also passes live startup on Steam DirectX 11: all eight game targets resolve, camera hooks and the keyboard gate install, all ten native events are present, and Camera Unleashed becomes ready. GOG activation still needs confirmation from a player using that build; successful SE resolution alone does not establish that the game function signatures matched.
 
 ## Lua interface
 
