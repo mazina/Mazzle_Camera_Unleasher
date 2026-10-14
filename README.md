@@ -16,9 +16,9 @@ Normal builds compile with MAZZLE_BRIDGE_DIAGNOSTICS=0. To intentionally collect
 
 ## Runtime
 
-The native mod loader loads the DLL from BG3's bin\NativeMods. Only the DLL is required there. The build embeds editable source bridge.lua as a Windows RCDATA resource; Lua bootstrap changes require rebuilding the DLL. No external Lua bootstrap is read at runtime. Remove a legacy NativeMods/bridge.lua when upgrading. The game camera/WASD addresses are resolved once from the same instruction patterns used by the SE patch. There is no game-executable hash whitelist; mappings must identify unique executable targets with the supported entry instructions and valid data references. It resolves native SE functions from the matching BG3ScriptExtender.symtab beside the loaded SE DLL, then verifies supported instruction/layout forms and helper/global relationships before installing any hooks. Missing, ambiguous, stale, or unsupported mappings refuse activation. The normal updater cache ships both files together.
+The native mod loader loads the DLL from BG3's bin\NativeMods. Only the DLL is required there. The build embeds editable source bridge.lua as a Windows RCDATA resource; Lua bootstrap changes require rebuilding the DLL. No external Lua bootstrap is read at runtime. Remove a legacy NativeMods/bridge.lua when upgrading. The game camera/WASD addresses are resolved once from the same instruction patterns used by the SE patch. There is no game-executable hash whitelist; mappings must identify unique executable targets with the supported entry instructions and valid data references. It resolves native SE functions directly from executable instruction anchors, PE function boundaries, native call relationships and class descriptors before installing any hooks. Bridge-owned ABI fields and descriptor/stride instructions retain exact witnesses. Missing, ambiguous or incompatible mappings refuse activation; no external symbol files are read.
 
-Before the startup-reporting and game-address resolver changes, normal build 34678B65 with B90BB9 Lua bootstrap embedded was live-validated on published Release C5E9041A (package73f6e7e, source af85fd2). The updater remains default Release (`{}`), without a pin. The current SE resolver passes offline checks against that Release and published Devel791C11 (package8d13e4cd, source45f32c1); its namespace changes have not been live-tested on Devel. The previous unchanged 00F341 build was live-tested on both published builds. There is no SE DLL hash whitelist or address profile. Recognized native instruction forms remain conservative: another compiler/body or unsupported ABI is rejected pending review; this is not universal compatibility.
+The current normal build C0C0CF7D is deployed and live-validated on published Release C5E9041A (package73f6e7e, source af85fd2). All ten native events, serialization and borrowed-object lifetimes, input cancellation, pitch overrides, actual WASD movement, and Lua reset recovery passed, with no console errors or warnings. Complete offline resolver checks also pass against published Devel791C11 and standalone DWrite3EDEFD76; those two builds have not been live-tested with this DLL. The updater remains default Release (`{}`), without a pin. There is no SE DLL hash whitelist or address profile. The pattern resolver accepts recognized instruction shapes and requires compatible bridge ABI witnesses. Arbitrary compiler transformations are not assumed compatible.
 
 Startup status is printed to the existing SE console, when enabled, with the
 `[Camera Unleasher]` prefix. `STARTING` confirms the DLL is running; `LOADED`
@@ -27,17 +27,22 @@ reason. A keyboard-hook failure is reported separately as `WASD is unavailable`.
 The file log stays in `%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender\MazzleNativeCameraBridgeFull.log`, resolved using Windows' LocalAppData known folder.
 If that directory or file cannot be opened, console reporting still works; no
 alternate log destination is used. Console reporting does not require successful
-SE symbol resolution and adds no camera/input-frame work. If the native mod
+SE address resolution and adds no camera/input-frame work. If the native mod
 loader never loads the DLL, the bridge cannot print a status message.
 
 Startup first looks for the normally named BG3ScriptExtender.dll. If absent,
 it checks loaded DWrite.dll modules for SE's standard product name and core DLL
 file description. Only these two DLL filenames are considered. The ordinary
 updater and Windows DWrite library are excluded.
-Multiple standalone SE candidates refuse activation. Symbol lookup uses the
-selected module's actual directory and basename: DWrite.dll requires the matching
-DWrite.symtab alongside it. The existing native instruction/layout checks still
-apply; discovery does not make arbitrary patched SE binaries compatible.
+Multiple standalone SE candidates refuse activation. Resolution uses only the
+loaded DLL: no symtab, PDB, debug directory, symbol server or build hash is used.
+Relocations and SE-owned internal fields are variable operands. Native caller
+relationships distinguish identical type-getter instruction templates, global
+references must agree, and PE TLS metadata bounds the discovered context slot.
+The bridge's own object, Lua, property-map and registration descriptor layouts
+remain checked through native instruction witnesses and class descriptors.
+All required targets must resolve uniquely; profiling helpers are an optional
+pair. Unsupported instruction shapes or incompatible ABI refuse activation.
 
 Successful camera/input dispatch performs no logging. A native dispatch failure
 is logged at most once per client Lua VM, with further identical failures
@@ -53,7 +58,7 @@ Camera Unleashed requests movement binding setup once at gameplay initialization
 
 ## Research and validation
 
-Tests, probes, ABI research, build artifacts, validation reports, and runtime backups belong in the separate tools repositories. The current packaging evidence is D:\BG3_Modding\Tools\Mazzle_Native_Camera_Bridge\EmbeddedBootstrap-20261012\RESULTS.md. It records resource byte equality, single-DLL startup, native event delivery/lifetimes, reset recovery and immutable rollback artifacts. Full native contract and prior Release/Devel resolver evidence remain in ClientCameraAPI-20261012 and RuntimeResolver-20261012T192902Z. Earlier native event proofs remain historical evidence in the camera tools repository.
+Tests, probes, ABI research, build artifacts, validation reports, and runtime backups belong in the separate tools repositories. Current resolver and deployment evidence is D:\BG3_Modding\Tools\Mazzle_Native_Camera_Bridge\PatternSE-20261014\RESULTS.md. It records all target comparisons against three DLLs, 169 rejection checks, sanitizer checks, and Release live validation with the deployed artifact's hash. EmbeddedBootstrap-20261012 records resource byte equality and single-DLL packaging. Full native contract and prior Release/Devel resolver evidence remain in ClientCameraAPI-20261012 and RuntimeResolver-20261012T192902Z. Earlier native event proofs remain historical evidence in the camera tools repository.
 
 Previous prototypes and source snapshots in the camera tools repository are historical research. The active implementation is owned by this repository.
 

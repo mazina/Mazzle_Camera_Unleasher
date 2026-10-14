@@ -1,8 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
-// Addresses are populated by the shipped-symtab/native-form resolver before hooks.
-// Constant layouts are validated by supported native instruction forms.
+// Addresses are populated by the instruction pattern resolver before hooks.
+// Constant layouts are validated by native instruction witnesses.
 inline uintptr_t RVA_OnUpdate=0;
 inline uintptr_t RVA_Shutdown=0;
 inline uintptr_t RVA_IncRefs=0;

@@ -19,7 +19,6 @@
 using Byte=unsigned char;
 #include "addresses.h"
 #include "runtime_module.h"
-#pragma comment(lib,"bcrypt.lib")
 #pragma comment(lib,"shell32.lib")
 #pragma comment(lib,"ole32.lib")
 #pragma comment(lib,"uuid.lib")
@@ -73,6 +72,7 @@ static SeString Borrow(char const* text){SeString s{};s.size=static_cast<uint32_
 #include "lua_value.h"
 #include "native_encoding.h"
 #include "runtime_resolver.h"
+
 #include "game_resolver.h"
 static_assert(sizeof(TValue)==16);
 static TValue* At(void* L,int index){return Se<TValue*(*)(void*,int)>(RVA_Index)(L,index);}
@@ -170,14 +170,14 @@ static void* AllocateRelay(uintptr_t site){SYSTEM_INFO info;GetSystemInfo(&info)
 #include "call_patch.h"
 static bool EnlistThreads(std::vector<HANDLE>& opened){HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(snap==INVALID_HANDLE_VALUE)return false;THREADENTRY32 entry{sizeof(entry)};bool ok=true;if(Thread32First(snap,&entry))do{if(entry.th32OwnerProcessID==GetCurrentProcessId() && entry.th32ThreadID!=GetCurrentThreadId()){HANDLE h=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_SET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,entry.th32ThreadID);if(!h){ok=false;break;}if(SuspendThread(h)==static_cast<DWORD>(-1)){CloseHandle(h);ok=false;break;}opened.push_back(h);if(DetourUpdateThread(h)!=NO_ERROR){ok=false;break;}}}while(Thread32Next(snap,&entry));CloseHandle(snap);return ok;}
 struct Hook{uintptr_t rva;bool se;void** original;void* hook;Byte const* bytes;size_t size;};
-static bool ResolveRuntime(HMODULE module,wchar_t const* modulePath){
+static bool ResolveRuntime(HMODULE module,wchar_t const*){
  using namespace RuntimeResolver;
  auto base=reinterpret_cast<Byte*>(module);auto dos=reinterpret_cast<IMAGE_DOS_HEADER const*>(base);auto nt=reinterpret_cast<IMAGE_NT_HEADERS64 const*>(base+dos->e_lfanew);
  Image image;image.memory={base,nt->OptionalHeader.SizeOfImage};image.pointerBase=reinterpret_cast<uintptr_t>(base);auto section=IMAGE_FIRST_SECTION(nt);
  for(unsigned i=0;i<nt->FileHeader.NumberOfSections;++i)image.sections.push_back({section[i].VirtualAddress,std::max(section[i].Misc.VirtualSize,section[i].SizeOfRawData),section[i].Characteristics});
- std::wstring path=modulePath;auto dot=path.find_last_of(L'.');if(dot==std::wstring::npos){ReportFailure("cannot determine the Script Extender symbol-table path");return false;}path.resize(dot);path+=L".symtab";
- std::ifstream file(path,std::ios::binary);if(!file){auto name=path.substr(path.find_last_of(L"\\/")+1);int count=WideCharToMultiByte(CP_UTF8,0,name.c_str(),static_cast<int>(name.size()),nullptr,0,nullptr,nullptr);std::string label(static_cast<size_t>(count),'\0');if(count)WideCharToMultiByte(CP_UTF8,0,name.c_str(),static_cast<int>(name.size()),label.data(),count,nullptr,nullptr);ReportFailure(label+" is missing or unreadable beside the loaded SE DLL");return false;}std::vector<Byte> symbols{std::istreambuf_iterator<char>(file),{}};Resolution result;std::string why;auto begin=GetTickCount64();
- if(!Resolve(image,symbols,result,why)){ReportFailure("SE resolver refused before hooks: "+why);return false;}
+ std::string why;auto begin=GetTickCount64();
+ Resolution result;
+ if(!Resolve(image,result,why)){ReportFailure("SE resolver refused before hooks: "+why);return false;}
  RVA_OnUpdate=result.rva[Slot(Id::OnUpdate)];
  RVA_Shutdown=result.rva[Slot(Id::Shutdown)];
  RVA_IncRefs=result.rva[Slot(Id::IncRefs)];
@@ -223,7 +223,7 @@ static bool ResolveRuntime(HMODULE module,wchar_t const* modulePath){
  RVA_ProfilerCtor=result.rva[Slot(Id::ProfilerCtor)];
  RVA_ProfilerDtor=result.rva[Slot(Id::ProfilerDtor)];
  TLS_ContextOffset=result.contextOffset;
- char message[220];snprintf(message,sizeof(message),"SE symtab resolved; ms=%llu context=%zx registry=%zx statics=%zx finalize=%zx profiler=%zx",GetTickCount64()-begin,TLS_ContextOffset,RVA_StructRegistry,RVA_StaticStructs,RVA_FinalizeClass,RVA_ProfilerCtor);Log(message);return true;
+ char message[220];snprintf(message,sizeof(message),"SE instruction patterns resolved; ms=%llu context=%zx registry=%zx statics=%zx finalize=%zx profiler=%zx",GetTickCount64()-begin,TLS_ContextOffset,RVA_StructRegistry,RVA_StaticStructs,RVA_FinalizeClass,RVA_ProfilerCtor);Log(message);return true;
 }
 static bool ResolveGame(HMODULE module){
  auto base=reinterpret_cast<Byte*>(module);auto dos=reinterpret_cast<IMAGE_DOS_HEADER const*>(base);auto nt=reinterpret_cast<IMAGE_NT_HEADERS64 const*>(base+dos->e_lfanew);

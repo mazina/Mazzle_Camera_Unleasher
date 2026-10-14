@@ -41,7 +41,7 @@ These helpers add setup capabilities to the bridge; the gate-only Set/GetKeyboar
 
 Native serialization follows SE rules: Ext.Types.Serialize(event) omits pointer fields. Direct JSON serialization requires the normal options for userdata/internal types, such as IterateUserdata=true and StringifyInternalTypes=true; stock default JSON options reject these native objects.
 
-Before the startup-reporting and game-address resolver changes, normal build 34678B65 was live-tested on published Release C5E9041A. The current SE resolver passes offline against both that Release and Devel791C11. The preceding 00F341 build has same-DLL live proof on both published builds. It resolves their matching shipped sibling symtabs and accepts only verified native instruction/layout forms, with bounded helper/global recognition. No SE version/hash whitelist or address profile is used; unsupported or ambiguous forms refuse hooks before activation. Game camera/WASD addresses are resolved from shared SE-patch instruction patterns, with unique-target and native instruction/reference checks; no game-executable hash whitelist is used. Final updater configuration is default Release (`{}`), without a pin. Exact patch API symmetry, a direct CameraDefinition property, and underlying ECS ClientCamera system reflection remain outside this implementation. The public Ext.ClientCamera Lua namespace is available.
+Current normal build C0C0CF7D is deployed and live-tested on published Release C5E9041A: all ten native events, serialization and lifetimes, input cancellation, pitch overrides, actual WASD movement, and Lua reset recovery passed. The complete resolver also passes offline against Devel791C11 and standalone DWrite3EDEFD76; these are not live gameplay results on those two builds. The resolver discovers native functions from instruction anchors and native call/data relations in the loaded DLL, with PE function boundaries, class descriptors and bridge ABI witnesses. No SE version/hash whitelist or address profile is used; unsupported or ambiguous forms refuse hooks before activation. Game camera/WASD addresses are resolved from shared SE-patch instruction patterns, with unique-target and native instruction/reference checks; no game-executable hash whitelist is used. Final updater configuration is default Release (`{}`), without a pin. Exact patch API symmetry, a direct CameraDefinition property, and underlying ECS ClientCamera system reflection remain outside this implementation. The public Ext.ClientCamera Lua namespace is available.
 
 Startup status uses the `[Camera Unleasher]` console prefix: `LOADED` means the
 client camera/input bindings and embedded Lua registration completed; `FAILED`
@@ -59,6 +59,13 @@ Deploy only Camera_Unleasher.dll in NativeMods. The Lua registration bootstrap i
 
 SE discovery prefers BG3ScriptExtender.dll. When it is absent, loaded DWrite.dll
 modules are checked for the standard SE product name and core DLL description.
-The updater and Windows DWrite do not qualify. The matching symbol table must
-use the selected DLL's basename (DWrite.symtab for standalone SE), beside that
-DLL. This discovery does not relax native instruction or ABI validation.
+The updater and Windows DWrite do not qualify. SE resolution reads only the loaded
+DLL. It does not read symtabs, PDBs or debug-directory metadata and contains no
+build hashes or address profiles. Native instruction anchors discover candidates;
+call relationships distinguish repeated type-getter templates. All derived global
+references must agree, and the TLS context displacement is extracted from the
+native indexed-load sequence and bounded by PE TLS metadata.
+Bridge-owned field offsets, descriptor layouts and strides retain native
+instruction witnesses. Required targets must be unique; profiler helpers remain
+an optional pair. Missing, ambiguous or incompatible mappings refuse activation
+before hooks. Resolution runs once at startup and adds no per-frame work.
