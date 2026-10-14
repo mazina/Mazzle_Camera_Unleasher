@@ -15,8 +15,10 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <algorithm>
 using Byte=unsigned char;
 #include "addresses.h"
+#include "runtime_module.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma comment(lib,"shell32.lib")
 #pragma comment(lib,"ole32.lib")
@@ -174,7 +176,7 @@ static bool ResolveRuntime(HMODULE module,wchar_t const* modulePath){
  Image image;image.memory={base,nt->OptionalHeader.SizeOfImage};image.pointerBase=reinterpret_cast<uintptr_t>(base);auto section=IMAGE_FIRST_SECTION(nt);
  for(unsigned i=0;i<nt->FileHeader.NumberOfSections;++i)image.sections.push_back({section[i].VirtualAddress,std::max(section[i].Misc.VirtualSize,section[i].SizeOfRawData),section[i].Characteristics});
  std::wstring path=modulePath;auto dot=path.find_last_of(L'.');if(dot==std::wstring::npos){ReportFailure("cannot determine the Script Extender symbol-table path");return false;}path.resize(dot);path+=L".symtab";
- std::ifstream file(path,std::ios::binary);if(!file){ReportFailure("BG3ScriptExtender.symtab is missing or unreadable beside the loaded SE DLL");return false;}std::vector<Byte> symbols{std::istreambuf_iterator<char>(file),{}};Resolution result;std::string why;auto begin=GetTickCount64();
+ std::ifstream file(path,std::ios::binary);if(!file){auto name=path.substr(path.find_last_of(L"\\/")+1);int count=WideCharToMultiByte(CP_UTF8,0,name.c_str(),static_cast<int>(name.size()),nullptr,0,nullptr,nullptr);std::string label(static_cast<size_t>(count),'\0');if(count)WideCharToMultiByte(CP_UTF8,0,name.c_str(),static_cast<int>(name.size()),label.data(),count,nullptr,nullptr);ReportFailure(label+" is missing or unreadable beside the loaded SE DLL");return false;}std::vector<Byte> symbols{std::istreambuf_iterator<char>(file),{}};Resolution result;std::string why;auto begin=GetTickCount64();
  if(!Resolve(image,symbols,result,why)){ReportFailure("SE resolver refused before hooks: "+why);return false;}
  RVA_OnUpdate=result.rva[Slot(Id::OnUpdate)];
  RVA_Shutdown=result.rva[Slot(Id::Shutdown)];
@@ -252,15 +254,15 @@ static bool LoadBootstrap(HMODULE module){
 }
 static DWORD WINAPI Start(void* instance){
  bool logAvailable=OpenLog();Log("standalone camera/input bridge starts");
- HMODULE se=nullptr;
- for(unsigned i=0;i<600 && !se;++i){se=GetModuleHandleW(L"BG3ScriptExtender.dll");if(!se)Sleep(100);}
- if(!se){ReportFailure("Script Extender DLL was not loaded within 60 seconds");return 2;}
+ RuntimeModule::Finder finder;RuntimeModule::Candidate candidate;bool ambiguous=false;
+ for(unsigned i=0;i<600 && !candidate.module;++i){candidate=finder.Find(ambiguous);if(ambiguous){ReportFailure("multiple standalone Script Extender modules found; no hooks installed");return 2;}if(!candidate.module)Sleep(100);}
+ if(!candidate.module){ReportFailure("could not find a loaded Script Extender module within 60 seconds; checked the standard DLL name and SE version metadata");return 2;}
+ HMODULE se=candidate.module;
  ReportStartup("STARTING: Script Extender found; checking compatibility.");
  if(!logAvailable)ReportStartup("WARNING: could not open the LocalAppData log; console reporting remains available.");
  if(!LoadBootstrap(static_cast<HMODULE>(instance))){ReportFailure("embedded Lua bootstrap missing or invalid; no hooks installed");return 1;}
- wchar_t path[32768];
- if(!GetModuleFileNameW(se,path,32768)){ReportFailure("cannot locate the loaded Script Extender DLL");return 3;}
- if(!ResolveRuntime(se,path))return 3;
+ if(candidate.path.empty()){ReportFailure("cannot locate the loaded Script Extender DLL");return 3;}
+ if(!ResolveRuntime(se,candidate.path.c_str()))return 3;
  auto game=GetModuleHandleW(nullptr);
  if(!ResolveGame(game))return 4;
  seBase=reinterpret_cast<Byte*>(se);gameBase=reinterpret_cast<Byte*>(game);

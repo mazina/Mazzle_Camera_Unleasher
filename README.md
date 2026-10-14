@@ -30,6 +30,15 @@ alternate log destination is used. Console reporting does not require successful
 SE symbol resolution and adds no camera/input-frame work. If the native mod
 loader never loads the DLL, the bridge cannot print a status message.
 
+Startup first looks for the normally named BG3ScriptExtender.dll. If absent,
+it checks loaded DWrite.dll modules for SE's standard product name and core DLL
+file description. Only these two DLL filenames are considered. The ordinary
+updater and Windows DWrite library are excluded.
+Multiple standalone SE candidates refuse activation. Symbol lookup uses the
+selected module's actual directory and basename: DWrite.dll requires the matching
+DWrite.symtab alongside it. The existing native instruction/layout checks still
+apply; discovery does not make arbitrary patched SE binaries compatible.
+
 Successful camera/input dispatch performs no logging. A native dispatch failure
 is logged at most once per client Lua VM, with further identical failures
 suppressed until that VM is replaced or reset.

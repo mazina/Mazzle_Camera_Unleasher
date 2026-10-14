@@ -56,3 +56,9 @@ Camera events and GetCameraDefinition are published under Ext.ClientCamera. Keyb
 Normal builds contain no statistics counters, counter updates, or diagnostic Lua functions. An intentional maintainer diagnostic build exposes Ext.ClientCamera._Diagnostics; there is no gameplay setting or runtime switch. See README.md for the build flag.
 
 Deploy only Camera_Unleasher.dll in NativeMods. The Lua registration bootstrap is embedded in the DLL; bridge.lua remains editable source and requires a rebuild when changed. No separate Lua file is needed at runtime.
+
+SE discovery prefers BG3ScriptExtender.dll. When it is absent, loaded DWrite.dll
+modules are checked for the standard SE product name and core DLL description.
+The updater and Windows DWrite do not qualify. The matching symbol table must
+use the selected DLL's basename (DWrite.symtab for standalone SE), beside that
+DLL. This discovery does not relax native instruction or ABI validation.
