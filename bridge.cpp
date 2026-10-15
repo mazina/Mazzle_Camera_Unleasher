@@ -104,6 +104,7 @@ static int Statistics(void* L){for(auto& count:calls)PushInt(L,static_cast<int64
 static void Bind(void* L,char const* name,int(*fn)(void*)){Se<void(*)(void*,char const*)>(RVA_PushString)(L,name);Se<void(*)(void*,int(*)(void*),int)>(RVA_PushClosure)(L,fn,0);Se<void(*)(void*,int)>(RVA_SetTable)(L,-3);}
 #include "input_bindings.h"
 #include "native_payload.h"
+#include "cursor_visibility.h"
 using InitializeFn=void(*)(void*);static InitializeFn nextInitialize;
 static void InitializeState(void* state){
  ++NativePayload::vmCount;nextInitialize(state);installedState=state;enabled=false;
@@ -117,7 +118,8 @@ static void InitializeState(void* state){
  Bind(L,"GetCameraDefinition",NativePayload::Definition);SetTop(L,top);
  ret=Load(state,"return Ext.Input","NativeInputBindings");
  if(!ret.hasValue || ret.value!=1){failed();return;}
- Bind(L,"SetKeyboardMovementOverride",KeyboardSet);Bind(L,"GetKeyboardMovementOverride",KeyboardGet);SetTop(L,top);
+ CursorVisibility::Initialize();
+ Bind(L,"SetKeyboardMovementOverride",KeyboardSet);Bind(L,"GetKeyboardMovementOverride",KeyboardGet);Bind(L,"SetCursorHidden",CursorVisibility::Set);SetTop(L,top);
  ret=Load(state,"return Ext.Input","NativeMovementBindingSetup");
  if(!ret.hasValue || ret.value!=1){failed();return;}
  Bind(L,"SyncKeyboardMovementBindings",InputBindings::Synchronize);Bind(L,"GetKeyboardMovementBindings",InputBindings::Snapshot);Bind(L,"GetKeyboardMovementBindingVersion",InputBindings::Revision);SetTop(L,top);
@@ -132,9 +134,9 @@ static void InitializeState(void* state){
  SetTop(L,top);
 }
 using UpdateFn=void(*)(void*,void const*);static UpdateFn nextUpdate;
-static void Update(void* ext,void const* time){clientExt.store(ext);nextUpdate(ext,time);}
+static void Update(void* ext,void const* time){clientExt.store(ext);nextUpdate(ext,time);CursorVisibility::Update();}
 using ShutdownFn=void(*)(void*);static ShutdownFn nextShutdown;
-static void Shutdown(void* ext){enabled=false;InputBindings::Shutdown();installedState=nullptr;clientExt.store(nullptr);KeyboardMovementOverride.store(0);BRIDGE_STAT(++generation);Log("client VM shutdown: dispatch ref invalidated; keyboard override false");nextShutdown(ext);KeyboardMovementOverride.store(0);}
+static void Shutdown(void* ext){enabled=false;InputBindings::Shutdown();installedState=nullptr;clientExt.store(nullptr);KeyboardMovementOverride.store(0);BRIDGE_STAT(++generation);Log("client VM shutdown: dispatch ref invalidated; keyboard override false");nextShutdown(ext);KeyboardMovementOverride.store(0);CursorVisibility::Shutdown();}
 struct DispatchResult{bool successful=false;float value=0;bool hasNumber=false;bool prevented=false;uint16_t inputResult=0;};
 static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0,void* input=nullptr,double original=0,bool ignore=false,bool select=false){
  DispatchResult result;void* ext=clientExt.load();if(!ext)return result;
