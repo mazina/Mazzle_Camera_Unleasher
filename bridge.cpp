@@ -40,6 +40,8 @@ static constexpr unsigned long long wrongThread=0;
 #define BRIDGE_STAT(expression) ((void)0)
 #endif
 static std::string companion;
+static HINSTANCE bridgeInstance{};
+static std::atomic_flag startupRequested=ATOMIC_FLAG_INIT;
 extern "C" { std::atomic<uint8_t> KeyboardMovementOverride{0}; uint8_t const* KeyboardMovementControllerMode=nullptr; void KeyboardMovementModeBridge(); }
 static_assert(sizeof(KeyboardMovementOverride)==1);
 static std::atomic<bool> keyboardAvailable{false};
@@ -109,7 +111,7 @@ using InitializeFn=void(*)(void*);static InitializeFn nextInitialize;
 static void InitializeState(void* state){
  ++NativePayload::vmCount;nextInitialize(state);installedState=state;enabled=false;
  dispatchFailureReported.store(false,std::memory_order_relaxed);
- if(!NativePayload::ready){ReportFailure("native camera registration unavailable; bindings refused");return;}
+ if(!NativePayload::ready){NativePayload::LogRegistrationState("client bindings refused");ReportFailure("native camera registration unavailable; bindings refused");return;}
  void* L=Field<void*>(state,SeAbi::StateLua);int top=Top(L);
  if(!Se<int(*)(void*,int)>(RVA_CheckStack)(L,64)){ReportFailure("cannot reserve Lua stack");return;}
  auto failed=[&](){SetTop(L,top);ReportFailure("binding table creation failed");};
@@ -170,7 +172,21 @@ using ResetZoomFn=void(*)(void*);static ResetZoomFn nextReset;
 static void ResetZoom(void* view){auto camera=Field<void*>(view,0x20);Dispatch(8,camera,0);nextReset(view);Dispatch(9,Field<void*>(view,0x20),0);}
 static void* AllocateRelay(uintptr_t site){SYSTEM_INFO info;GetSystemInfo(&info);auto granularity=static_cast<uintptr_t>(info.dwAllocationGranularity);auto lower=site>0x7fff0000ull?site-0x7fff0000ull:granularity;auto upper=site+0x7fff0000ull;auto address=(lower+granularity-1)&~(granularity-1);while(address<upper){MEMORY_BASIC_INFORMATION region;if(!VirtualQuery(reinterpret_cast<void*>(address),&region,sizeof(region)))break;auto end=reinterpret_cast<uintptr_t>(region.BaseAddress)+region.RegionSize;if(region.State==MEM_FREE && end-address>=info.dwPageSize){if(auto relay=VirtualAlloc(reinterpret_cast<void*>(address),info.dwPageSize,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE))return relay;}if(end<=address)break;address=(end+granularity-1)&~(granularity-1);}return nullptr;}
 #include "call_patch.h"
-static bool EnlistThreads(std::vector<HANDLE>& opened){HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(snap==INVALID_HANDLE_VALUE)return false;THREADENTRY32 entry{sizeof(entry)};bool ok=true;if(Thread32First(snap,&entry))do{if(entry.th32OwnerProcessID==GetCurrentProcessId() && entry.th32ThreadID!=GetCurrentThreadId()){HANDLE h=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_SET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,entry.th32ThreadID);if(!h){ok=false;break;}if(SuspendThread(h)==static_cast<DWORD>(-1)){CloseHandle(h);ok=false;break;}opened.push_back(h);if(DetourUpdateThread(h)!=NO_ERROR){ok=false;break;}}}while(Thread32Next(snap,&entry));CloseHandle(snap);return ok;}
+static LONG EnlistThreads(std::vector<HANDLE>& opened){
+ HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(snap==INVALID_HANDLE_VALUE)return static_cast<LONG>(GetLastError());
+ THREADENTRY32 entry{sizeof(entry)};LONG result=NO_ERROR;
+ if(!Thread32First(snap,&entry)){result=static_cast<LONG>(GetLastError());CloseHandle(snap);return result;}
+ for(;;){
+  if(entry.th32OwnerProcessID==GetCurrentProcessId() && entry.th32ThreadID!=GetCurrentThreadId()){
+   HANDLE h=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_SET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,entry.th32ThreadID);
+   if(!h){result=static_cast<LONG>(GetLastError());break;}
+   if(SuspendThread(h)==static_cast<DWORD>(-1)){result=static_cast<LONG>(GetLastError());CloseHandle(h);break;}
+   opened.push_back(h);result=DetourUpdateThread(h);if(result!=NO_ERROR)break;
+  }
+  if(!Thread32Next(snap,&entry)){auto error=GetLastError();if(error!=ERROR_NO_MORE_FILES)result=static_cast<LONG>(error);break;}
+ }
+ CloseHandle(snap);return result;
+}
 struct Hook{uintptr_t rva;bool se;void** original;void* hook;Byte const* bytes;size_t size;};
 static bool ResolveRuntime(HMODULE module,wchar_t const*){
  using namespace RuntimeResolver;
@@ -281,7 +297,11 @@ static DWORD WINAPI Start(void* instance){
   bindingsPrepared=pathCall.Prepare(gameBase+bindings.pathCall,reinterpret_cast<void*>(InputBindings::CapturePath)) && remapCall.Prepare(gameBase+bindings.remapCall,reinterpret_cast<void*>(InputBindings::AfterRemap));
  }
  LONG result=DetourTransactionBegin();std::vector<HANDLE> opened;
- if(result==NO_ERROR && !EnlistThreads(opened))result=ERROR_ACCESS_DENIED;
+ if(result==NO_ERROR)result=EnlistThreads(opened);
+ bool haveRegistration=result==NO_ERROR;NativePayload::RegistrationState registration{};
+ if(haveRegistration)registration=NativePayload::CaptureRegistrationState();
+ bool lateRegistration=haveRegistration && registration.statics!=0;
+ if(lateRegistration)result=ERROR_INVALID_STATE;
  for(auto& hook:hooks)if(result==NO_ERROR)result=DetourAttach(hook.original,hook.hook);
  bool keyboardInstalled=false,bindingsInstalled=false;
  if(result==NO_ERROR){
@@ -294,13 +314,17 @@ static DWORD WINAPI Start(void* instance){
  // Our extra suspension keeps raw CALL patches protected even when Detours
  // resumes its own enlisted threads on commit or abort.
  for(HANDLE h:opened){ResumeThread(h);CloseHandle(h);}
+ if(haveRegistration)NativePayload::LogRegistrationState("before hook installation",registration);
  keyboard.Discard();pathCall.Discard();remapCall.Discard();
  char message[160];snprintf(message,sizeof(message),"hooks result=%ld keyboard=%d bindings=%d; default override false",result,keyboardAvailable.load(),InputBindings::available);Log(message);
- if(result!=NO_ERROR)ReportFailure("hook installation failed with Windows error "+std::to_string(result));
+ if(result!=NO_ERROR)ReportFailure(lateRegistration?"SE type registration already completed before native loader initialization; no hooks installed":"hook installation failed with Windows error "+std::to_string(result));
  else{if(!keyboardAvailable.load())ReportStartup("WARNING: keyboard movement hook failed; WASD is unavailable.");if(!InputBindings::available)ReportStartup("WARNING: movement binding hooks failed; automatic WASD setup is unavailable.");}
  return result;
 }
-BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(instance);HANDLE thread=CreateThread(nullptr,0,Start,instance,0,nullptr);if(thread)CloseHandle(thread);else ReportFailure("cannot start the bridge initialization thread");}return TRUE;}
+// Native Mod Loader calls Init after LoadLibrary returns, before continuing
+// the game's CRT initialization. Finish installing type hooks at that boundary.
+extern "C" __declspec(dllexport) void Init(){if(!startupRequested.test_and_set())Start(bridgeInstance);}
+BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){bridgeInstance=instance;DisableThreadLibraryCalls(instance);}return TRUE;}
 
 
 

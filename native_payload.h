@@ -36,6 +36,11 @@ using Resize=void(*)(void*,uint32_t);static Resize nextResize;
 static char const* names[Count]={"CameraUpdating","CameraUpdated","CameraPitchUpdating","CameraPitchUpdated","CameraZoomUpdated","CameraPitchCalculated","CameraInput","CameraInputHandled","CameraZoomResetting","CameraZoomReset"};
 static Array& Registry(){return *reinterpret_cast<Array*>(seBase+RegistryRva);}
 static Array& Statics(){return *reinterpret_cast<Array*>(seBase+StaticStructsRva);}
+struct RegistrationState {uint32_t registry,statics;int first;unsigned vms;bool ready;};
+static RegistrationState CaptureRegistrationState(){return {Registry().size,Statics().size,firstId,vmCount.load(),ready};}
+static void LogRegistrationState(char const* phase,RegistrationState state=CaptureRegistrationState()){
+ char text[240];snprintf(text,sizeof(text),"native registration %s: registry=%u statics=%u first=%d VMs=%u ready=%d",phase,state.registry,state.statics,state.first,state.vms,state.ready);Log(text);
+}
 static void* Map(int id){return static_cast<void**>(Registry().data)[id];}
 static int FindMap(char const* name){auto& a=Registry();for(uint32_t i=0;i<a.size;++i){auto pm=static_cast<void**>(a.data)[i];if(!pm)continue;auto text=Se<char const*(*)(void const*)>(RVA_FixedStringText)(static_cast<Byte*>(pm)+SeAbi::MapName);if(text && strcmp(text,name)==0)return static_cast<int>(i);}return -1;}
 
@@ -101,6 +106,7 @@ template<unsigned I>static void RegisterType(){
 template<size_t... I>static void AllMaps(std::index_sequence<I...>){(RegisterMap<I>(),...);}
 template<size_t... I>static void AllTypes(std::index_sequence<I...>){(RegisterType<I>(),...);}
 static void InitializeTypes(void* repository){
+ LogRegistrationState("initializer entered");
  auto& reg=Registry();auto& st=Statics();
  if(vmCount.load() || reg.size==0 || reg.size+Count>UINT16_MAX || st.size!=0 || firstId>=0){ReportFailure("native events: late/duplicate startup refused");nextTypeInitialize(repository);return;}
  parentId=FindMap("lua::EventBase");cameraId=FindMap("ecl::GameCameraBehavior");inputId=FindMap("input::InputEvent");definitionId=FindMap("CameraGlobalSwitches");
