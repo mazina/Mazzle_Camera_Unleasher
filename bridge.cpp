@@ -126,7 +126,7 @@ static void InitializeState(void* state){
  Bind(L,"SetKeyboardMovementOverride",KeyboardSet);Bind(L,"GetKeyboardMovementOverride",KeyboardGet);Bind(L,"SetCursorHidden",CursorVisibility::Set);Bind(L,"SetRotationCursorEnabled",RotationCursor::Set);SetTop(L,top);
  ret=Load(state,"return Ext.Input","NativeMovementBindingSetup");
  if(!ret.hasValue || ret.value!=1){failed();return;}
- Bind(L,"SyncKeyboardMovementBindings",InputBindings::Synchronize);Bind(L,"GetKeyboardMovementBindings",InputBindings::Snapshot);Bind(L,"GetKeyboardMovementBindingVersion",InputBindings::Revision);SetTop(L,top);
+ Bind(L,"SyncKeyboardMovementBindings",InputBindings::Synchronize);SetTop(L,top);
 #if MAZZLE_BRIDGE_DIAGNOSTICS
  ret=Load(state,"local diagnostics={}; Ext.ClientCamera._Diagnostics=diagnostics; return diagnostics","NativeCameraDiagnostics");
  if(!ret.hasValue || ret.value!=1){failed();return;}

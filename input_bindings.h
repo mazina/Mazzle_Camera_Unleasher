@@ -11,8 +11,7 @@ static PathFn nextPath;static RemapFn nextRemap;static ReloadFn reload;
 static InputBindingResolver::Resolution addresses;
 static bool available;
 static SRWLOCK lock=SRWLOCK_INIT;
-static std::wstring path;static std::string snapshot;
-static std::atomic<uint64_t> revision{};
+static std::wstring path;
 static std::atomic<bool> active{false};
 struct Exclusive {Exclusive(){AcquireSRWLockExclusive(&lock);}~Exclusive(){ReleaseSRWLockExclusive(&lock);}};
 static uint64_t* CapturePath(uint64_t* source,uint32_t* second,void* third){
@@ -26,7 +25,7 @@ static uint64_t* CapturePath(uint64_t* source,uint32_t* second,void* third){
   if(filename && !_stricmp(filename+1,"inputconfig_p1.json")){
    int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text,-1,nullptr,0);
    if(count>1){std::wstring selected(static_cast<size_t>(count),L'\0');if(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text,-1,selected.data(),count)){
-    selected.resize(static_cast<size_t>(count)-1);Exclusive guard;if(path!=selected){path=std::move(selected);snapshot.clear();revision.fetch_add(1,std::memory_order_release);Log((std::string("active player input config path: ")+text).c_str());}
+    selected.resize(static_cast<size_t>(count)-1);Exclusive guard;if(path!=selected){path=std::move(selected);Log((std::string("active player input config path: ")+text).c_str());}
    }}
   }
  }
@@ -59,10 +58,8 @@ static bool Sync(){
    if(!input)why="cannot open the active player input config";
    else{
     std::string contents{std::istreambuf_iterator<char>(input),{}};input.close();
-    rapidjson::Document document;document.Parse(contents.data(),contents.size());std::string updated;
-    if(InputBindingConfig::Build(document,updated,changed,why) && (!changed || Write(path,InputBindingConfig::Serialize(document),why))){
-     if(snapshot!=updated){snapshot=std::move(updated);revision.fetch_add(1,std::memory_order_release);}
-    }
+    rapidjson::Document document;document.Parse(contents.data(),contents.size());
+    if(InputBindingConfig::Build(document,changed,why) && changed)Write(path,InputBindingConfig::Serialize(document),why);
    }
   }
  }
@@ -70,18 +67,7 @@ static bool Sync(){
  if(changed)reload(0,0);
  active.store(true,std::memory_order_release);Log(changed?"movement bindings synchronized and reloaded":"movement bindings already synchronized");return true;
 }
-static void AfterRemap(int64_t menu){Log("input keybinding menu commit entered");nextRemap(menu);Log("input keybinding menu commit returned");if(active.load(std::memory_order_acquire) && !Sync()){KeyboardMovementOverride.store(0);Exclusive guard;snapshot.clear();revision.fetch_add(1,std::memory_order_release);}}
+static void AfterRemap(int64_t menu){Log("input keybinding menu commit entered");nextRemap(menu);Log("input keybinding menu commit returned");if(active.load(std::memory_order_acquire) && !Sync())KeyboardMovementOverride.store(0);}
 static int Synchronize(void* L){PushBool(L,installedState.load()!=nullptr && Sync());return 1;}
-static int Revision(void* L){PushInt(L,static_cast<int64_t>(revision.load(std::memory_order_acquire)));return 1;}
-static int Snapshot(void* L){
- std::string text;{Exclusive guard;text=snapshot;}
- auto state=installedState.load();if(text.empty() || !state){PushNil(L);return 1;}
- // Use SE's normal JSON parser, yielding an ordinary table rather than a
- // wrapper. JSON bindings can contain Lua's long-string delimiter.
- std::string equals;while(text.find("]"+equals+"]")!=std::string::npos)equals+='=';
- auto script="return Ext.Json.Parse(["+equals+"["+text+"]"+equals+"])";
- int top=Top(L);auto result=Load(state,script.c_str(),"NativeKeyboardBindings");
- if(!result.hasValue || result.value!=1){SetTop(L,top);PushNil(L);return 1;}return 1;
-}
 static void Shutdown(){active.store(false,std::memory_order_release);}
 }

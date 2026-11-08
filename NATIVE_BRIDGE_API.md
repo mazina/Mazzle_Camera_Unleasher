@@ -45,19 +45,15 @@ Set `false` when the owning feature stops, yields, or its setting is disabled. R
 
 Send policy changes on transitions. Position capture uses native rotation notifications; confinement and virtual-cursor restoration use the game's SDL polling path and do not call Lua. Idle hooks make no SDL calls, allocations, or log writes. Relative-mode changes, cursor warps, and synthetic refresh events occur only on transitions. The virtual cursor retains original WASD's six-pixel drag threshold before hover suppression.
 
-The bridge also supplies these setup/cache helpers under Ext.Input:
+The bridge also supplies this setup helper under Ext.Input:
 
 | Function | Result |
 |---|---|
 | SyncKeyboardMovementBindings() | Boolean success. Synchronizes the active player-one config and reloads it if changed. Call once when gameplay is ready, or explicitly to retry a reported failure. |
-| GetKeyboardMovementBindings() | Ordinary Lua table of binding string arrays for CameraForward/Backward/Left/Right, CameraRotateLeft/Right, and CameraToggleMouseRotate; nil when no successful snapshot exists. |
-| GetKeyboardMovementBindingVersion() | Integer revision. Cheap to check each frame; retrieve and parse a new snapshot only when it changes. |
 
 Synchronization follows native WASD's mapping policy: CameraForward/Backward/Left/Right replace the corresponding CharacterMove arrays, with the controller left-stick Y direction flipped. Missing camera direction entries use native WASD defaults; explicitly empty arrays remain empty. This intentionally replaces independent CharacterMove direction assignments. Camera bindings, modifiers, alternative keys, and unrelated input preferences remain unchanged. The file is replaced through a temporary file in the same directory, and unchanged configurations are not rewritten or reloaded.
 
-The path comes from the game's input-config reload call rather than an assumed drive, user, or profile name. Once synchronization succeeds, leaving the keybinding menu refreshes the file and snapshot. Shutdown stops automatic synchronization and clears the movement override again after Lua shutdown subscribers return. Synchronization does no per-frame work; the snapshot is an ordinary copied table with no borrowed engine references. A failed remap synchronization invalidates the snapshot and disables the native override. CU reports the failure once and retries only on an explicit movement command or a new VM initialization.
-
-These helpers add setup capabilities to the bridge; the gate-only Set/GetKeyboardMovementOverride semantics and SE source are unchanged. Camera Unleashed retains its existing patched-SE path when the setup helpers are absent.
+The path comes from the game's input-config reload call rather than an assumed drive, user, or profile name. Once synchronization succeeds, leaving the keybinding menu refreshes the mappings. Shutdown stops automatic synchronization and clears the movement override again after Lua shutdown subscribers return. Synchronization does no per-frame work. A failed remap synchronization disables the native override.
 
 Native serialization follows SE rules: Ext.Types.Serialize(event) omits pointer fields. Direct JSON serialization requires the normal options for userdata/internal types, such as IterateUserdata=true and StringifyInternalTypes=true; stock default JSON options reject these native objects.
 
