@@ -33,7 +33,7 @@ static FILE* logFile;static SRWLOCK logLock=SRWLOCK_INIT;
 #endif
 #if MAZZLE_BRIDGE_DIAGNOSTICS
 static std::atomic<unsigned> generation{};
-static std::atomic<unsigned long long> calls[10]{},errors{},prevented{},overrides{};
+static std::atomic<unsigned long long> calls[11]{},errors{},prevented{},overrides{};
 static constexpr unsigned long long wrongThread=0;
 #define BRIDGE_STAT(expression) do { expression; } while (false)
 #else
@@ -102,7 +102,7 @@ static OptionalInt Load(void* state,char const* text,char const* label){auto cod
 static int KeyboardSet(void* L){if(At(L,1)->tag!=1)return Se<int(*)(void*,int,char const*)>(RVA_ArgError)(L,1,"boolean expected");if(keyboardAvailable)KeyboardMovementOverride.store(Boolean(L,1),std::memory_order_relaxed);PushBool(L,keyboardAvailable);return 1;}
 static int KeyboardGet(void* L){PushBool(L,KeyboardMovementOverride.load(std::memory_order_relaxed)!=0);return 1;}
 #if MAZZLE_BRIDGE_DIAGNOSTICS
-static int Statistics(void* L){for(auto& count:calls)PushInt(L,static_cast<int64_t>(count.load()));PushInt(L,static_cast<int64_t>(errors.load()));PushInt(L,static_cast<int64_t>(wrongThread));PushInt(L,generation.load());PushInt(L,static_cast<int64_t>(prevented.load()));PushInt(L,static_cast<int64_t>(overrides.load()));return 15;}
+static int Statistics(void* L){for(auto& count:calls)PushInt(L,static_cast<int64_t>(count.load()));PushInt(L,static_cast<int64_t>(errors.load()));PushInt(L,static_cast<int64_t>(wrongThread));PushInt(L,generation.load());PushInt(L,static_cast<int64_t>(prevented.load()));PushInt(L,static_cast<int64_t>(overrides.load()));return 16;}
 #endif
 static void Bind(void* L,char const* name,int(*fn)(void*)){Se<void(*)(void*,char const*)>(RVA_PushString)(L,name);Se<void(*)(void*,int(*)(void*),int)>(RVA_PushClosure)(L,fn,0);Se<void(*)(void*,int)>(RVA_SetTable)(L,-3);}
 #include "input_bindings.h"
@@ -142,7 +142,7 @@ static void Update(void* ext,void const* time){clientExt.store(ext);nextUpdate(e
 using ShutdownFn=void(*)(void*);static ShutdownFn nextShutdown;
 static void Shutdown(void* ext){enabled=false;InputBindings::Shutdown();installedState=nullptr;clientExt.store(nullptr);KeyboardMovementOverride.store(0);BRIDGE_STAT(++generation);Log("client VM shutdown: dispatch ref invalidated; keyboard override false");nextShutdown(ext);KeyboardMovementOverride.store(0);CursorVisibility::Shutdown();RotationCursor::Shutdown();}
 struct DispatchResult{bool successful=false;float value=0;bool hasNumber=false;bool prevented=false;uint16_t inputResult=0;};
-static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0,void* input=nullptr,double original=0,bool ignore=false,bool select=false){
+static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0,void* input=nullptr,double original=0,bool ignore=false,bool select=false,NativePayload::CommitEvent* commit=nullptr){
  DispatchResult result;void* ext=clientExt.load();if(!ext)return result;
  auto tls=reinterpret_cast<Byte**>(__readgsqword(0x58));auto tlsIndex=*reinterpret_cast<DWORD*>(seBase+RVA_TLSIndex);int& context=*reinterpret_cast<int*>(tls[tlsIndex]+TLS_ContextOffset);int priorContext=context;context=2;
  Se<void(*)(void*)>(RVA_IncRefs)(ext);void* state=Field<void*>(ext,SeAbi::ExtensionLua);
@@ -152,13 +152,22 @@ static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0
    alignas(8) Byte lifetime[SeAbi::PinBytes]{};alignas(8) Byte profiler[8]{};
    InitializeLifetimePin(lifetime,L,static_cast<Byte*>(state)+SeAbi::StateLifetimeStack);
    if(RVA_ProfilerCtor)Se<void(*)(void*,void*)>(RVA_ProfilerCtor)(profiler,state);
-   auto native=NativePayload::Dispatch(static_cast<unsigned>(event),state,L,camera,dt,entity,input,static_cast<float>(original),ignore,select,*Field<uint64_t*>(lifetime,SeAbi::PinCurrentReference));BRIDGE_STAT(++calls[event]);
+   auto native=NativePayload::Dispatch(static_cast<unsigned>(event),state,L,camera,dt,entity,input,static_cast<float>(original),ignore,select,*Field<uint64_t*>(lifetime,SeAbi::PinCurrentReference),commit);BRIDGE_STAT(++calls[event]);
    result.successful=native.status==0;result.prevented=native.status==2;result.value=native.pitch;result.hasNumber=event==5;result.inputResult=native.input;
    if(native.status==1){BRIDGE_STAT(++errors);if(!dispatchFailureReported.exchange(true,std::memory_order_relaxed))Log("native event dispatch failed; engine fallback retained; further failures suppressed until the next client VM");}
    SetTop(L,top);if(RVA_ProfilerDtor)Se<void(*)(void*)>(RVA_ProfilerDtor)(profiler);Se<void(*)(void*)>(RVA_LifetimeDtor)(lifetime);
   }
  }
  Se<void(*)(void*,bool)>(RVA_DecRefs)(ext,true);context=priorContext;return result;
+}
+using CommitCameraFn=void(*)(void*,void const*,NativePayload::Vector3 const&,NativePayload::Vector3 const&);static CommitCameraFn nextCommitCamera;
+static void CommitCamera(void* self,void const* entity,NativePayload::Vector3 const& eye,NativePayload::Vector3 const& target){
+ NativePayload::CommitEvent evt{};evt.eye=eye;evt.target=target;
+ auto result=Dispatch(10,nullptr,0,*static_cast<uint64_t const*>(entity),nullptr,0,false,false,&evt);
+ auto dx=evt.target.x-evt.eye.x,dy=evt.target.y-evt.eye.y,dz=evt.target.z-evt.eye.z;auto lengthSq=dx*dx+dy*dy+dz*dz;
+ bool accepted=result.successful && std::isfinite(evt.eye.x) && std::isfinite(evt.eye.y) && std::isfinite(evt.eye.z)
+  && std::isfinite(evt.target.x) && std::isfinite(evt.target.y) && std::isfinite(evt.target.z) && std::isfinite(lengthSq) && lengthSq>0;
+ nextCommitCamera(self,entity,accepted?evt.eye:eye,accepted?evt.target:target);
 }
 using UpdateCameraFn=void(*)(void*,void*,void const*,void*);static UpdateCameraFn nextCamera;
 static void Camera(void* self,void* context,void const* time,void* view){auto camera=Field<void*>(view,0x30);auto dt=Field<float>(const_cast<void*>(time),0xc);auto entity=Field<uint64_t>(view,0x70);Dispatch(0,camera,dt,entity);nextCamera(self,context,time,view);Dispatch(1,Field<void*>(view,0x30),Field<float>(const_cast<void*>(time),0xc),Field<uint64_t>(view,0x70));}
@@ -264,6 +273,7 @@ static bool ResolveGame(HMODULE module){
  if(!RotationCursorResolver::Resolve(image,RotationCursor::addresses,why)){
   ReportStartup(("WARNING: rotation cursor unavailable: "+why).c_str());RotationCursor::addresses={};
  }
+ RVA_CommitCamera=result.rva[static_cast<size_t>(GameResolver::Id::CommitCamera)];
  RVA_UpdateCamera=result.rva[static_cast<size_t>(GameResolver::Id::UpdateCamera)];
  RVA_UpdatePitch=result.rva[static_cast<size_t>(GameResolver::Id::UpdatePitch)];
  RVA_UpdateZoom=result.rva[static_cast<size_t>(GameResolver::Id::UpdateZoom)];
@@ -298,7 +308,7 @@ static DWORD WINAPI Start(void* instance){
  auto game=GetModuleHandleW(nullptr);
  if(!ResolveGame(game))return 4;
  seBase=reinterpret_cast<Byte*>(se);gameBase=reinterpret_cast<Byte*>(game);
- Hook hooks[]={{RVA_TypeInitialize,true,reinterpret_cast<void**>(&NativePayload::nextTypeInitialize),reinterpret_cast<void*>(NativePayload::InitializeTypes),nullptr,0},{RVA_ResizeStructs,true,reinterpret_cast<void**>(&NativePayload::nextResize),reinterpret_cast<void*>(NativePayload::ResizeStatics),nullptr,0},{RVA_OnUpdate,true,reinterpret_cast<void**>(&nextUpdate),reinterpret_cast<void*>(Update),nullptr,0},{RVA_Shutdown,true,reinterpret_cast<void**>(&nextShutdown),reinterpret_cast<void*>(Shutdown),nullptr,0},{RVA_ClientInitialize,true,reinterpret_cast<void**>(&nextInitialize),reinterpret_cast<void*>(InitializeState),nullptr,0},{RVA_UpdateCamera,false,reinterpret_cast<void**>(&nextCamera),reinterpret_cast<void*>(Camera),Bytes_UpdateCamera,sizeof(Bytes_UpdateCamera)},{RVA_UpdatePitch,false,reinterpret_cast<void**>(&nextUpdatePitch),reinterpret_cast<void*>(UpdatePitch),Bytes_UpdatePitch,sizeof(Bytes_UpdatePitch)},{RVA_UpdateZoom,false,reinterpret_cast<void**>(&nextZoom),reinterpret_cast<void*>(Zoom),Bytes_UpdateZoom,sizeof(Bytes_UpdateZoom)},{RVA_Pitch,false,reinterpret_cast<void**>(&nextPitch),reinterpret_cast<void*>(Pitch),Bytes_Pitch,sizeof(Bytes_Pitch)},{RVA_Input,false,reinterpret_cast<void**>(&nextInput),reinterpret_cast<void*>(Input),Bytes_Input,sizeof(Bytes_Input)},{RVA_ResetZoom,false,reinterpret_cast<void**>(&nextReset),reinterpret_cast<void*>(ResetZoom),Bytes_ResetZoom,sizeof(Bytes_ResetZoom)}};
+ Hook hooks[]={{RVA_TypeInitialize,true,reinterpret_cast<void**>(&NativePayload::nextTypeInitialize),reinterpret_cast<void*>(NativePayload::InitializeTypes),nullptr,0},{RVA_ResizeStructs,true,reinterpret_cast<void**>(&NativePayload::nextResize),reinterpret_cast<void*>(NativePayload::ResizeStatics),nullptr,0},{RVA_OnUpdate,true,reinterpret_cast<void**>(&nextUpdate),reinterpret_cast<void*>(Update),nullptr,0},{RVA_Shutdown,true,reinterpret_cast<void**>(&nextShutdown),reinterpret_cast<void*>(Shutdown),nullptr,0},{RVA_ClientInitialize,true,reinterpret_cast<void**>(&nextInitialize),reinterpret_cast<void*>(InitializeState),nullptr,0},{RVA_CommitCamera,false,reinterpret_cast<void**>(&nextCommitCamera),reinterpret_cast<void*>(CommitCamera),Bytes_CommitCamera,sizeof(Bytes_CommitCamera)},{RVA_UpdateCamera,false,reinterpret_cast<void**>(&nextCamera),reinterpret_cast<void*>(Camera),Bytes_UpdateCamera,sizeof(Bytes_UpdateCamera)},{RVA_UpdatePitch,false,reinterpret_cast<void**>(&nextUpdatePitch),reinterpret_cast<void*>(UpdatePitch),Bytes_UpdatePitch,sizeof(Bytes_UpdatePitch)},{RVA_UpdateZoom,false,reinterpret_cast<void**>(&nextZoom),reinterpret_cast<void*>(Zoom),Bytes_UpdateZoom,sizeof(Bytes_UpdateZoom)},{RVA_Pitch,false,reinterpret_cast<void**>(&nextPitch),reinterpret_cast<void*>(Pitch),Bytes_Pitch,sizeof(Bytes_Pitch)},{RVA_Input,false,reinterpret_cast<void**>(&nextInput),reinterpret_cast<void*>(Input),Bytes_Input,sizeof(Bytes_Input)},{RVA_ResetZoom,false,reinterpret_cast<void**>(&nextReset),reinterpret_cast<void*>(ResetZoom),Bytes_ResetZoom,sizeof(Bytes_ResetZoom)}};
  for(auto& hook:hooks){auto target=(hook.se?seBase:gameBase)+hook.rva;if(hook.bytes && memcmp(target,hook.bytes,hook.size)){ReportFailure("hook prologue mismatch; no hooks installed");return 5;}*hook.original=target;}
  CallPatch keyboard,pathCall,remapCall;auto site=gameBase+RVA_KeyboardGate;
  int32_t modeOffset;memcpy(&modeOffset,site+2,4);KeyboardMovementControllerMode=site+7+modeOffset;

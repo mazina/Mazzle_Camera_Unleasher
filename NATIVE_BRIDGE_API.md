@@ -7,6 +7,7 @@ The plugin registers these client events through the existing SE event manager. 
 
 | Events | Payload fields |
 |---|---|
+| CameraCommitting | Entity, Eye, Target |
 | CameraUpdating, CameraUpdated | Entity, Camera, DeltaTime |
 | CameraPitchUpdating, CameraPitchUpdated, CameraZoomUpdated | Camera, DeltaTime |
 | CameraPitchCalculated | Camera, IgnoreAvoidance, SelectMode, OriginalPitch, Pitch |
@@ -14,11 +15,17 @@ The plugin registers these client events through the existing SE event manager. 
 | CameraInputHandled | Camera, Input, Result |
 | CameraZoomResetting, CameraZoomReset | Camera |
 
-Event context fields are read-only. CameraPitchCalculated.Pitch is a writable float, and CameraInput.Result is a writable uint16. CameraInputHandled.Result is read-only. The native camera and input objects referenced by read-only fields retain their usual writable properties.
+Event context fields are read-only. CameraCommitting.Eye and CameraCommitting.Target are writable vectors. CameraPitchCalculated.Pitch is a writable float, and CameraInput.Result is a writable uint16. CameraInputHandled.Result is read-only. The native camera and input objects referenced by read-only fields retain their usual writable properties.
 
 Use Ext.ClientCamera.<EventName>:Subscribe(callback, options) and :Unsubscribe(id). These reference the same native SE event objects registered in the normal event manager; Ext.Events continues to resolve them. SE provides priority, one-shot subscriptions, propagation stopping, custom properties, reflection, validation, and standard object serialization. Calling PreventAction() on CameraInput suppresses native handling and the handled event, returning the event's Result. Finite successful pitch overrides replace the engine result; NaN and infinity retain the original pitch.
 
 event.Camera is ecl::GameCameraBehavior. event.Input is input::InputEvent; its OldValue and NewValue are input::InputValue. All references borrowed from a callback expire when its native callback lifetime ends. Store copied scalar values for later use.
+
+`CameraCommitting` runs immediately before the native camera transform is submitted. For gameplay cameras this is after obstruction/avoidance placement, inside `CameraUpdating`/`CameraUpdated`. It also applies to other cameras using this commit routine; it is not a once-per-frame notification.
+
+The payload has read-only `Entity` and writable `Eye` and `Target` world-space `vec3` values. Assign `{x, y, z}` tables to these fields to replace the submitted position and look-at target. Changes affect this submission only; they do not overwrite the gameplay camera's target or smoothing state. No `Camera` field is supplied because this routine also accepts cameras without `GameCameraBehavior`. Filter by `Entity` when an override should affect a particular camera.
+
+The event cannot prevent the native commit. Failed dispatch, nonfinite coordinates, and zero-length or nonfinite eye-to-target squared distance retain both original vectors. Event objects expire after the callback; copy values that must be retained.
 
 Get the camera definition with:
 

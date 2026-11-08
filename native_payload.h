@@ -10,6 +10,9 @@ struct DeltaEvent:Base {void* camera=nullptr;float dt=0;};
 struct PitchEvent:Base {void* camera=nullptr;bool ignore=false,select=false;float original=0,pitch=0;};
 struct InputEvent:Base {void* camera=nullptr;void* input=nullptr;uint16_t result=0;};
 struct ResetEvent:Base {void* camera=nullptr;};
+struct Vector3 {float x,y,z;};
+struct CommitEvent:Base {uint64_t entity=0;Vector3 eye{},target{};};
+static_assert(sizeof(CommitEvent)==40 && offsetof(CommitEvent,entity)==8 && offsetof(CommitEvent,eye)==16 && offsetof(CommitEvent,target)==28);
 static_assert(offsetof(Base,name)==0 && offsetof(Base,canPrevent)==4 && offsetof(Base,prevented)==5 && offsetof(Base,stopped)==6);
 static_assert(offsetof(UpdateEvent,entity)==8 && offsetof(UpdateEvent,camera)==16 && offsetof(UpdateEvent,dt)==24);
 static_assert(offsetof(DeltaEvent,camera)==8 && offsetof(DeltaEvent,dt)==16);
@@ -25,15 +28,15 @@ struct PropertyEntry {char const* name;Getter get;Setter set;bool(*validate)(voi
 struct Descriptor {int32_t kind; union {ClassEntry cls;PropertyEntry property;int32_t parent;};};
 static_assert(sizeof(ClassEntry)==80 && sizeof(PropertyEntry)==80 && sizeof(Descriptor)==88);
 
-static constexpr unsigned Count=10;
+static constexpr unsigned Count=11;
 static int firstId=-1,cameraId=-1,inputId=-1,definitionId=-1,parentId=-1;
 static void* maps[Count]{};static bool early=false,ready=false;static std::atomic<unsigned> vmCount{0};
 #if MAZZLE_BRIDGE_DIAGNOSTICS
-static std::atomic<uint64_t> validationCalls[12]{};
+static std::atomic<uint64_t> validationCalls[Count+2]{};
 #endif
 using TypeInitialize=void(*)(void*);static TypeInitialize nextTypeInitialize;
 using Resize=void(*)(void*,uint32_t);static Resize nextResize;
-static char const* names[Count]={"CameraUpdating","CameraUpdated","CameraPitchUpdating","CameraPitchUpdated","CameraZoomUpdated","CameraPitchCalculated","CameraInput","CameraInputHandled","CameraZoomResetting","CameraZoomReset"};
+static char const* names[Count]={"CameraUpdating","CameraUpdated","CameraPitchUpdating","CameraPitchUpdated","CameraZoomUpdated","CameraPitchCalculated","CameraInput","CameraInputHandled","CameraZoomResetting","CameraZoomReset","CameraCommitting"};
 static Array& Registry(){return *reinterpret_cast<Array*>(seBase+RegistryRva);}
 static Array& Statics(){return *reinterpret_cast<Array*>(seBase+StaticStructsRva);}
 struct RegistrationState {uint32_t registry,statics;int first;unsigned vms;bool ready;};
@@ -49,7 +52,7 @@ static bool CanPush(int id,void const* object){
  auto pm=Map(id);
  return NativeValidation::AllowProxy(ValidationBit(id),Field<int32_t>(pm,SeAbi::MapValidated),[&](){
 #if MAZZLE_BRIDGE_DIAGNOSTICS
-  if(id==cameraId)++validationCalls[10];else if(id==inputId)++validationCalls[11];else if(id>=firstId && id<firstId+static_cast<int>(Count))++validationCalls[id-firstId];
+  if(id==cameraId)++validationCalls[Count];else if(id==inputId)++validationCalls[Count+1];else if(id>=firstId && id<firstId+static_cast<int>(Count))++validationCalls[id-firstId];
 #endif
   return Se<bool(*)(void*,void const*)>(RVA_ValidateMap)(pm,object);
  });
@@ -72,10 +75,19 @@ static int ReadResult(void* L,uint64_t,void const* value,void const*){PushInt(L,
 static int SerializeBool(void* L,void const* value,void const*){return ReadBool(L,0,value,nullptr);}
 static int SerializeResult(void* L,void const* value,void const*){return ReadResult(L,0,value,nullptr);}
 static Setter floatSetter=nullptr,resultSetter=nullptr;
-static Setter FindSetter(void* pm,char const* name){auto count=Field<uint32_t>(pm,SeAbi::MapPropertyCount);auto entries=Field<Byte*>(pm,SeAbi::MapProperties);for(uint32_t i=0;i<count;++i){auto e=entries+static_cast<size_t>(i)*SeAbi::PropertyStride;auto text=Se<char const*(*)(void const*)>(RVA_FixedStringText)(e);if(text && strcmp(text,name)==0)return Field<Setter>(e,SeAbi::PropertySetter);}return nullptr;}
+static Byte* FindProperty(void* pm,char const* name){auto count=Field<uint32_t>(pm,SeAbi::MapPropertyCount);auto entries=Field<Byte*>(pm,SeAbi::MapProperties);for(uint32_t i=0;i<count;++i){auto e=entries+static_cast<size_t>(i)*SeAbi::PropertyStride;auto text=Se<char const*(*)(void const*)>(RVA_FixedStringText)(e);if(text && strcmp(text,name)==0)return e;}return nullptr;}
+static Setter FindSetter(void* pm,char const* name){auto p=FindProperty(pm,name);return p?Field<Setter>(p,SeAbi::PropertySetter):nullptr;}
+static Getter vectorGetter;static Setter vectorSetter;static Serializer vectorSerializer;static Validator vectorValidator;static void* vectorType;
+static void* FindMemberType(void* ty,char const* name){
+ struct Node {Node* next;uint32_t name;void* type;};
+ struct Members {uint32_t buckets;Node** table;uint32_t size;};
+ auto const& members=Field<Members>(ty,SeAbi::TypeMembers);
+ for(uint32_t i=0;i<members.buckets;++i)for(auto node=members.table[i];node;node=node->next){auto text=Se<char const*(*)(void const*)>(RVA_FixedStringText)(&node->name);if(text && strcmp(text,name)==0)return node->type;}
+ return nullptr;
+}
 template<unsigned I>static void Serialize(void* L,void const* obj){Se<void(*)(void*,void const*,void const*)>(RVA_SerializeRaw)(L,obj,maps[I]);}
 template<unsigned I>static void Unserialize(void* L,int index,void* obj){Se<void(*)(void*,int,void*,void const*)>(RVA_UnserializeRaw)(L,index,obj,maps[I]);}
-template<unsigned I>using Payload=std::conditional_t<(I<2),UpdateEvent,std::conditional_t<(I<5),DeltaEvent,std::conditional_t<I==5,PitchEvent,std::conditional_t<(I<8),InputEvent,ResetEvent>>>>;
+template<unsigned I>using Payload=std::conditional_t<(I<2),UpdateEvent,std::conditional_t<(I<5),DeltaEvent,std::conditional_t<I==5,PitchEvent,std::conditional_t<(I<8),InputEvent,std::conditional_t<(I<10),ResetEvent,CommitEvent>>>>>;
 template<unsigned I>static void Construct(void* obj){new(obj) Payload<I>();}
 template<unsigned I>static void Destroy(void* obj){Se<void(*)(uint32_t)>(RVA_FixedStringRelease)(static_cast<Payload<I>*>(obj)->name);}
 template<unsigned I>static void Assign(void* obj,void* other){auto& out=*static_cast<Payload<I>*>(obj);auto& in=*static_cast<Payload<I>*>(other);struct View{char const* ptr;uint64_t size;};auto text=Se<char const*(*)(void const*)>(RVA_FixedStringText)(&in.name);View v{text,text?strlen(text):0};auto name=text?Se<uint32_t(*)(View const*)>(RVA_FixedStringCreate)(&v):0xffffffffu;Se<void(*)(uint32_t)>(RVA_FixedStringRelease)(out.name);out=in;out.name=name;}
@@ -87,11 +99,12 @@ template<unsigned I>static void RegisterMap(){
  std::vector<Descriptor> ds;Descriptor cls{};cls.kind=0;cls.cls={full.c_str(),full.c_str(),nullptr,firstId+static_cast<int>(I),-1,sizeof(Payload<I>),Construct<I>,Destroy<I>,Assign<I>,Serialize<I>,Unserialize<I>};ds.push_back(cls);
  Descriptor parent{};parent.kind=1;parent.parent=parentId;ds.push_back(parent);
  auto prop=[&](char const* name,Getter get,Setter set,Validator validate,Serializer serialize,size_t offset){Descriptor d{};d.kind=3;d.property={name,get,set,validate,serialize,offset,0,0,nullptr,true};ds.push_back(d);};
- if constexpr(I<2)prop("Entity",ReadEntity,ReadOnly,FindValidator(Map(cameraId),"Trigger"),SerializeEntity,8);
- prop("Camera",ReadCamera,ReadOnly,ValidateCamera,nullptr,I<2?16:8);
+ if constexpr(I<2 || I==10)prop("Entity",ReadEntity,ReadOnly,FindValidator(Map(cameraId),"Trigger"),SerializeEntity,8);
+ if constexpr(I!=10)prop("Camera",ReadCamera,ReadOnly,ValidateCamera,nullptr,I<2?16:8);
  if constexpr(I<5)prop("DeltaTime",ReadFloat,ReadOnly,FindValidator(Map(cameraId),"ZoomSpeed"),SerializeFloat,I<2?24:16);
  if constexpr(I==5){prop("IgnoreAvoidance",ReadBool,ReadOnly,FindValidator(Map(cameraId),"PlayerInControl"),SerializeBool,16);prop("SelectMode",ReadBool,ReadOnly,FindValidator(Map(cameraId),"PlayerInControl"),SerializeBool,17);prop("OriginalPitch",ReadFloat,ReadOnly,FindValidator(Map(cameraId),"ZoomSpeed"),SerializeFloat,20);prop("Pitch",ReadFloat,floatSetter,FindValidator(Map(cameraId),"ZoomSpeed"),SerializeFloat,24);}
  if constexpr(I==6 || I==7){prop("Input",ReadInput,ReadOnly,ValidateInput,nullptr,16);prop("Result",ReadResult,I==6?resultSetter:ReadOnly,FindValidator(Map(inputId),"DeviceId"),SerializeResult,24);}
+ if constexpr(I==10){prop("Eye",vectorGetter,vectorSetter,vectorValidator,vectorSerializer,16);prop("Target",vectorGetter,vectorSetter,vectorValidator,vectorSerializer,28);}
  Descriptor end{};end.kind=5;ds.push_back(end);Se<void(*)(Descriptor const*)>(RVA_ProcessDefinitions)(ds.data());maps[I]=Map(firstId+I);Se<void(*)(void const*,void*)>(RVA_InheritProperties)(Map(parentId),maps[I]);
 }
 // Event-name references live with the registered native types across Lua resets.
@@ -100,7 +113,8 @@ template<unsigned I>static void RegisterType(){
  if(SeAbi::FixedStringEvents){struct View{char const* text;uint64_t size;};View name{names[I],strlen(names[I])};fixedEventNames[I]=Se<uint32_t(*)(View const*)>(RVA_FixedStringCreate)(&name);}
  std::string full=std::string("ecl::lua::")+names[I]+"Event";std::string native=std::string("struct bg3se::")+full;
  auto ty=Se<void*(*)(char const*,char const*,void*,char const*,char const*)>(RVA_RegisterClass)(full.c_str(),native.c_str(),maps[I],nullptr,nullptr);Field<void*>(ty,SeAbi::TypeParent)=TypeRef(parentId);
- if constexpr(I<2)Member(ty,"Entity",Se<void*(*)()>(RVA_StaticEntityType)());Member(ty,"Camera",TypeRef(cameraId));
+ if constexpr(I<2 || I==10)Member(ty,"Entity",Se<void*(*)()>(RVA_StaticEntityType)());if constexpr(I!=10)Member(ty,"Camera",TypeRef(cameraId));
+ if constexpr(I==10){Member(ty,"Eye",vectorType);Member(ty,"Target",vectorType);}
  if constexpr(I<5)Member(ty,"DeltaTime",Se<void*(*)()>(RVA_StaticFloatType)());
  if constexpr(I==5){Member(ty,"IgnoreAvoidance",Se<void*(*)()>(RVA_StaticBoolType)());Member(ty,"SelectMode",Se<void*(*)()>(RVA_StaticBoolType)());Member(ty,"OriginalPitch",Se<void*(*)()>(RVA_StaticFloatType)());Member(ty,"Pitch",Se<void*(*)()>(RVA_StaticFloatType)());}
  if constexpr(I==6 || I==7){Member(ty,"Input",TypeRef(inputId));Member(ty,"Result",Se<void*(*)()>(RVA_StaticUInt16Type)());}
@@ -116,6 +130,10 @@ static void InitializeTypes(void* repository){
  if(parentId<0 || cameraId<0 || inputId<0 || definitionId<0){ReportFailure("native events: required official maps missing");nextTypeInitialize(repository);return;}
  floatSetter=FindSetter(Map(cameraId),"ZoomSpeed");resultSetter=FindSetter(Map(inputId),"DeviceId");
  if(!floatSetter || !resultSetter || !FindValidator(Map(cameraId),"Trigger") || !FindValidator(Map(cameraId),"ZoomSpeed") || !FindValidator(Map(cameraId),"PlayerInControl") || !FindValidator(Map(inputId),"DeviceId")){ReportFailure("native events: official scalar accessors missing");nextTypeInitialize(repository);return;}
+ auto vector=FindProperty(Map(cameraId),"TargetCurrent");vectorValidator=FindValidator(Map(cameraId),"TargetCurrent");
+ if(!vector || !vectorValidator){ReportFailure("native events: official vector accessors missing");nextTypeInitialize(repository);return;}
+ vectorGetter=Field<Getter>(vector,SeAbi::PropertyGetter);vectorSetter=Field<Setter>(vector,SeAbi::PropertySetter);vectorSerializer=Field<Serializer>(vector,SeAbi::PropertySerializer);
+ if(!vectorGetter || !vectorSetter || !vectorSerializer){ReportFailure("native events: incomplete official vector accessors");nextTypeInitialize(repository);return;}
  firstId=static_cast<int>(reg.size);auto newSize=reg.size+Count;auto buffer=Se<void*(*)(size_t)>(RVA_Alloc)(static_cast<size_t>(newSize)*sizeof(void*));if(!buffer){ReportFailure("native event registry allocation failed");firstId=-1;nextTypeInitialize(repository);return;}
  memcpy(buffer,reg.data,static_cast<size_t>(reg.size)*sizeof(void*));memset(static_cast<void**>(buffer)+reg.size,0,Count*sizeof(void*));
  auto bits=seBase+RegistryRva+SeAbi::RegistryBits;auto required=(newSize+63u)&~63u;auto oldBitSize=Field<uint32_t>(bits,SeAbi::BitsetSize);void* newBits=nullptr;
@@ -123,11 +141,13 @@ static void InitializeTypes(void* repository){
  auto old=reg.data;reg.data=buffer;reg.capacity=newSize;reg.size=newSize;Se<void(*)(void*)>(RVA_Free)(old);
  if(newBits){auto oldBits=Field<void*>(bits,0);Field<void*>(bits,0)=newBits;Field<uint32_t>(bits,SeAbi::BitsetSize)=required;Se<void(*)(void*)>(RVA_Free)(oldBits);}
  early=true;AllMaps(std::make_index_sequence<Count>{});nextTypeInitialize(repository);if(st.size!=reg.size){ReportFailure("native events: static registry mismatch; dispatch refused");return;}
- AllTypes(std::make_index_sequence<Count>{});ready=true;Log("native events: all ten registered before type Finalize and Lua VMs");
+ vectorType=FindMemberType(Field<void*>(TypeRef(cameraId),0),"TargetCurrent");
+ if(!vectorType){ReportFailure("native events: official vector type missing; dispatch refused");return;}
+ AllTypes(std::make_index_sequence<Count>{});ready=true;Log("native events: all eleven registered before type Finalize and Lua VMs");
 }
 struct Result{int status=1;float pitch=0;uint16_t input=0;};
-template<unsigned I>static Result DispatchOne(void* state,void* L,void* camera,float dt,uint64_t entity,void* input,float original,bool ignore,bool select,uint64_t lifetime){
- Payload<I> evt{};evt.camera=camera;
+template<unsigned I>static Result DispatchOne(void* state,void* L,void* camera,float dt,uint64_t entity,void* input,float original,bool ignore,bool select,uint64_t lifetime,CommitEvent* commit=nullptr){
+ Payload<I> evt{};if constexpr(I!=10)evt.camera=camera;else {evt.entity=entity;evt.eye=commit->eye;evt.target=commit->target;}
  if constexpr(I<2){evt.entity=entity;evt.dt=dt;}else if constexpr(I<5)evt.dt=dt;
  if constexpr(I==5){evt.original=original;evt.pitch=original;evt.ignore=ignore;evt.select=select;}
  if constexpr(I==6 || I==7){evt.input=input;evt.result=I==6?0:static_cast<uint16_t>(original);}
@@ -135,13 +155,14 @@ template<unsigned I>static Result DispatchOne(void* state,void* L,void* camera,f
  Result ret;
  if(SeAbi::FixedStringEvents)ret.status=Se<int(*)(void*,Base*,uint32_t const*,bool,uint32_t)>(RVA_DispatchEvent)(state,&evt,&fixedEventNames[I],I==6,0);
  else ret.status=Se<int(*)(void*,Base*,char const*,bool,uint32_t)>(RVA_DispatchEvent)(state,&evt,names[I],I==6,0);
+ if constexpr(I==10){commit->eye=evt.eye;commit->target=evt.target;}
  if constexpr(I==5)ret.pitch=evt.pitch;if constexpr(I==6 || I==7)ret.input=evt.result;
  Se<void(*)(uint32_t)>(RVA_FixedStringRelease)(evt.name);return ret;
 }
-static Result Dispatch(unsigned i,void* state,void* L,void* camera,float dt,uint64_t entity,void* input,float original,bool ignore,bool select,uint64_t lifetime){
+static Result Dispatch(unsigned i,void* state,void* L,void* camera,float dt,uint64_t entity,void* input,float original,bool ignore,bool select,uint64_t lifetime,CommitEvent* commit=nullptr){
  if(!ready)return {};switch(i){
-#define EVENT_CASE(I) case I:return DispatchOne<I>(state,L,camera,dt,entity,input,original,ignore,select,lifetime)
- EVENT_CASE(0);EVENT_CASE(1);EVENT_CASE(2);EVENT_CASE(3);EVENT_CASE(4);EVENT_CASE(5);EVENT_CASE(6);EVENT_CASE(7);EVENT_CASE(8);EVENT_CASE(9);
+#define EVENT_CASE(I) case I:return DispatchOne<I>(state,L,camera,dt,entity,input,original,ignore,select,lifetime,commit)
+ EVENT_CASE(0);EVENT_CASE(1);EVENT_CASE(2);EVENT_CASE(3);EVENT_CASE(4);EVENT_CASE(5);EVENT_CASE(6);EVENT_CASE(7);EVENT_CASE(8);EVENT_CASE(9);EVENT_CASE(10);
 #undef EVENT_CASE
  default:return {};}
 }
