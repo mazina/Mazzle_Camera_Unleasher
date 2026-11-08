@@ -1,5 +1,8 @@
 # Native bridge Lua interface
 
+When the loaded Script Extender provides native camera events, the bridge skips initialization before installing hooks or Lua bindings. Consumers should prefer the standard `Ext.Events` camera events and `GameCameraBehavior.CameraDefinition`, falling back to `Ext.ClientCamera` and `GetCameraDefinition` on supported SE builds without those APIs. Backend selection can be cached for the lifetime of the Lua VM; borrowed camera/definition proxies must still be used only within their valid callbacks.
+
+
 The plugin registers these client events through the existing SE event manager. Each payload is a distinct native SE object inheriting lua::EventBase.
 
 | Events | Payload fields |
@@ -28,6 +31,12 @@ Keyboard movement uses Ext.Input.SetKeyboardMovementOverride(enabled) and Ext.In
 `Ext.Input.SetCursorHidden(boolean)` requests forced cursor hiding. It returns whether the loaded SDL cursor exports are available. `true` keeps the cursor hidden until `false` ends that request and shows the cursor again. A `false` request while idle does nothing. This controls visibility only; BG3 still selects the cursor image. Lua VM shutdown ends any outstanding hide request after shutdown callbacks return.
 
 The request is applied by the bridge's existing client-update hook. Hiding uses SDL's exported `SDL_ShowCursor` and `SDL_SetCursor` functions, without additional game hooks, mappings, or input subscriptions. Idle updates make no SDL calls; hidden updates reapply visibility without logging. Callers should send requests on transitions rather than every frame. This helper is bridge-specific and is not required by the camera or movement APIs.
+
+`Ext.Input.SetRotationCursorEnabled(boolean)` arms native rotation cursor handling. It returns whether all required game call sites and SDL exports were installed successfully. Set `true` before rotation begins; the native rotation-start hook captures the window-relative cursor position. SDL relative mode confines and hides the mouse while retaining continuous motion. Native release restores the saved position before leaving relative mode, including BG3's virtual cursor. Repeated rotation-start notifications do not replace the saved position. This API is independent of `SetCursorHidden`; do not combine the two for rotation.
+
+Set `false` when the owning feature stops, yields, or its setting is disabled. Requests and Lua VM shutdown are applied by the next main-thread SDL poll, with restoration data retained in native state. Focus loss also releases confinement and requires a new rotation-start notification before recapture. SDL hints are restored after an owned session. A relative mode already owned elsewhere is left untouched; a failed acquisition is not retried every frame. The return value reports API availability, not asynchronous SDL acquisition success.
+
+Send policy changes on transitions. Position capture uses native rotation notifications; confinement and virtual-cursor restoration use the game's SDL polling path and do not call Lua. Idle hooks make no SDL calls, allocations, or log writes. Relative-mode changes, cursor warps, and synthetic refresh events occur only on transitions. The virtual cursor retains original WASD's six-pixel drag threshold before hover suppression.
 
 The bridge also supplies these setup/cache helpers under Ext.Input:
 

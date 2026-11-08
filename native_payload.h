@@ -94,7 +94,10 @@ template<unsigned I>static void RegisterMap(){
  if constexpr(I==6 || I==7){prop("Input",ReadInput,ReadOnly,ValidateInput,nullptr,16);prop("Result",ReadResult,I==6?resultSetter:ReadOnly,FindValidator(Map(inputId),"DeviceId"),SerializeResult,24);}
  Descriptor end{};end.kind=5;ds.push_back(end);Se<void(*)(Descriptor const*)>(RVA_ProcessDefinitions)(ds.data());maps[I]=Map(firstId+I);Se<void(*)(void const*,void*)>(RVA_InheritProperties)(Map(parentId),maps[I]);
 }
+// Event-name references live with the registered native types across Lua resets.
+static uint32_t fixedEventNames[Count]{};
 template<unsigned I>static void RegisterType(){
+ if(SeAbi::FixedStringEvents){struct View{char const* text;uint64_t size;};View name{names[I],strlen(names[I])};fixedEventNames[I]=Se<uint32_t(*)(View const*)>(RVA_FixedStringCreate)(&name);}
  std::string full=std::string("ecl::lua::")+names[I]+"Event";std::string native=std::string("struct bg3se::")+full;
  auto ty=Se<void*(*)(char const*,char const*,void*,char const*,char const*)>(RVA_RegisterClass)(full.c_str(),native.c_str(),maps[I],nullptr,nullptr);Field<void*>(ty,SeAbi::TypeParent)=TypeRef(parentId);
  if constexpr(I<2)Member(ty,"Entity",Se<void*(*)()>(RVA_StaticEntityType)());Member(ty,"Camera",TypeRef(cameraId));
@@ -129,7 +132,9 @@ template<unsigned I>static Result DispatchOne(void* state,void* L,void* camera,f
  if constexpr(I==5){evt.original=original;evt.pitch=original;evt.ignore=ignore;evt.select=select;}
  if constexpr(I==6 || I==7){evt.input=input;evt.result=I==6?0:static_cast<uint16_t>(original);}
  Se<void(*)(void*,char const*)>(RVA_PushInternalFunction)(L,"_ThrowEvent");PushObject(L,firstId+I,&evt,lifetime);
- Result ret;ret.status=Se<int(*)(void*,Base*,char const*,bool,uint32_t)>(RVA_DispatchEvent)(state,&evt,names[I],I==6,0);
+ Result ret;
+ if(SeAbi::FixedStringEvents)ret.status=Se<int(*)(void*,Base*,uint32_t const*,bool,uint32_t)>(RVA_DispatchEvent)(state,&evt,&fixedEventNames[I],I==6,0);
+ else ret.status=Se<int(*)(void*,Base*,char const*,bool,uint32_t)>(RVA_DispatchEvent)(state,&evt,names[I],I==6,0);
  if constexpr(I==5)ret.pitch=evt.pitch;if constexpr(I==6 || I==7)ret.input=evt.result;
  Se<void(*)(uint32_t)>(RVA_FixedStringRelease)(evt.name);return ret;
 }

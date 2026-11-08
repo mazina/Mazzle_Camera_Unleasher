@@ -10,6 +10,8 @@ struct Resolution {
  std::array<uint32_t,static_cast<size_t>(Id::Count)> rva{};
  std::array<Symbol,static_cast<size_t>(Id::Count)> symbols{};
  std::array<Form const*,static_cast<size_t>(Id::Count)> forms{};
+ bool fixedStringEvents=false;
+ uint32_t extensionLua=0,stateLifetimeStack=0;
  uint32_t contextOffset=0;uint32_t cameraBytes=0,inputBytes=0,compiledCount=0;bool complete=false;
 };
 static size_t Slot(Id id){return static_cast<size_t>(id);}
@@ -128,7 +130,7 @@ static bool Discover(Image const& image,Resolution& result,std::string& why){
   }
  }
  for(auto const& wanted:Names){auto slot=Slot(wanted.id);auto const& set=candidates[slot];
-  if(set.empty()){if(wanted.id==Id::FinalizeClass||wanted.id==Id::ProfilerCtor||wanted.id==Id::ProfilerDtor)continue;why="missing instruction anchor: "+std::string(wanted.text);return false;}
+  if(set.empty()){if(wanted.id==Id::LifetimeCtor||wanted.id==Id::LifetimeAllocate||wanted.id==Id::FinalizeClass||wanted.id==Id::ProfilerCtor||wanted.id==Id::ProfilerDtor)continue;why="missing instruction anchor: "+std::string(wanted.text);return false;}
   uint32_t at=set[0].rva;for(auto const& c:set)if(c.rva!=at){why="ambiguous instruction anchor: "+std::string(wanted.text);return false;}
   auto form=set[0].form;result.rva[slot]=at;result.forms[slot]=form;
   auto boundary=std::lower_bound(functions.begin(),functions.end(),at,[](RUNTIME_FUNCTION const& f,uint32_t r){return f.BeginAddress<r;});
@@ -173,6 +175,21 @@ static bool ClassDescriptor(Image const& image,char const* name,uint32_t& assign
  }if(count!=1){why="missing/ambiguous native class descriptor";return false;}return true;
 }
 static bool Layouts(Image const& image,Resolution& result,std::string& why){
+ // The supported native forms witness both field operands in their complete bodies.
+ bool nativePin=result.rva[Slot(Id::LifetimeCtor)]!=0;
+ if(!nativePin && !result.rva[Slot(Id::LifetimeAllocate)]){why="missing lifetime constructor/allocation path";return false;}
+ result.fixedStringEvents=result.forms[Slot(Id::DispatchEvent)]->pattern==Devel34DispatchEventPattern;
+ result.extensionLua=nativePin?0x1780:0x1710;
+ result.stateLifetimeStack=nativePin?0x8290:0x8288;
+ auto fieldWitness=[&](Id id,std::span<Byte const> prefix,uint32_t offset){
+  auto f=result.symbols[Slot(id)];unsigned count=0;
+  for(uint32_t n=0;n+prefix.size()+4<=f.bytes;++n){uint32_t value{};
+   if(Match(image,f.rva+n,prefix)&&image.Read(f.rva+n+static_cast<uint32_t>(prefix.size()),value)&&value==offset)++count;
+  }return count!=0;
+ };
+ constexpr Byte luaField[]={0x48,0x8b,0x8f},luaFieldRCX[]={0x48,0x8b,0x89},luaFieldRBX[]={0x48,0x8b,0x8b},stackField[]={0x4d,0x8d,0xaf};
+ if(!(fieldWitness(Id::Shutdown,luaField,result.extensionLua)||fieldWitness(Id::Shutdown,luaFieldRCX,result.extensionLua)||fieldWitness(Id::Shutdown,luaFieldRBX,result.extensionLua))||!fieldWitness(Id::LoadScript,stackField,result.stateLifetimeStack)){why="unsupported client Lua/lifetime stack fields";return false;}
+
  uint32_t assign{},construct{},eventBase{};if(!ClassDescriptor(image,"lua::EventBase",assign,construct,why,&eventBase))return false;
  // The bridge embeds EventBase. Its inherited Stopped property is accessed by
  // SE's native property getter, so witness its descriptor offset.

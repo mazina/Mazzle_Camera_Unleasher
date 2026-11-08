@@ -4,8 +4,9 @@
 struct CallPatch {
  Byte* site{};Byte* relay{};size_t size{};DWORD protection{};bool applied{};
  std::array<Byte,7> original{},replacement{};
- bool Prepare(Byte* address,void* destination,bool keyboard=false){
-  site=address;size=keyboard?7:5;if(!keyboard && site[0]!=0xe8)return false;
+ bool Prepare(Byte* address,void* destination,bool keyboard=false,size_t callBytes=5){
+  site=address;size=keyboard?7:callBytes;
+  if(!keyboard && !((size==5 && site[0]==0xe8) || (size==6 && site[0]==0xff && (site[1]==0x15 || site[1]==0x90))))return false;
   memcpy(original.data(),site,size);relay=static_cast<Byte*>(AllocateRelay(reinterpret_cast<uintptr_t>(site)));if(!relay)return false;
   Byte jump[]={0xff,0x25,0,0,0,0};memcpy(relay,jump,sizeof(jump));memcpy(relay+6,&destination,sizeof(destination));DWORD ignored;
   if(!VirtualProtect(relay,14,PAGE_EXECUTE_READ,&ignored))return false;
@@ -13,7 +14,7 @@ struct CallPatch {
   auto difference=reinterpret_cast<intptr_t>(relay)-reinterpret_cast<intptr_t>(site+5);
   if(difference<INT32_MIN || difference>INT32_MAX)return false;
   replacement[0]=0xe8;auto displacement=static_cast<int32_t>(difference);memcpy(replacement.data()+1,&displacement,4);
-  if(keyboard){replacement[5]=0x84;replacement[6]=0xc0;}return true;
+  if(keyboard){replacement[5]=0x84;replacement[6]=0xc0;}else if(size==6)replacement[5]=0x90;return true;
  }
  bool Apply(){
   if(memcmp(site,original.data(),size) || !VirtualProtect(site,size,PAGE_EXECUTE_READWRITE,&protection))return false;
