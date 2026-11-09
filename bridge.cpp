@@ -1,3 +1,4 @@
+#include "deferred_startup.h"
 #define NOMINMAX
 #include <windows.h>
 #include <shlobj.h>
@@ -356,9 +357,9 @@ static DWORD WINAPI Start(void* instance){
  else{if(!RotationCursor::available)ReportStartup("WARNING: rotation cursor hooks unavailable; mouse confinement is disabled.");else Log("rotation cursor main-thread hooks installed");if(!keyboardAvailable.load())ReportStartup("WARNING: keyboard movement hook failed; WASD is unavailable.");if(!InputBindings::available)ReportStartup("WARNING: movement binding hooks failed; automatic WASD setup is unavailable.");}
  return result;
 }
-// Native Mod Loader calls Init after LoadLibrary returns, before continuing
-// the game's CRT initialization. Finish installing type hooks at that boundary.
-extern "C" __declspec(dllexport) void Init(){if(!startupRequested.test_and_set())Start(bridgeInstance);}
+// Initialize internally at SDL_Init, before SE finalizes type registration.
+static void InitializeDeferred(){if(!startupRequested.test_and_set())Start(bridgeInstance);}
+extern "C" __declspec(dllexport) void Init(){DeferredStartup::Schedule(InitializeDeferred);}
 BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){bridgeInstance=instance;DisableThreadLibraryCalls(instance);}return TRUE;}
 
 

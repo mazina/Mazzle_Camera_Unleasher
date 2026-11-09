@@ -3,6 +3,9 @@
 When the loaded Script Extender provides native camera events, the bridge skips initialization before installing hooks or Lua bindings. Consumers should prefer the standard `Ext.Events` camera events and `GameCameraBehavior.CameraDefinition`, falling back to `Ext.ClientCamera` and `GetCameraDefinition` on supported SE builds without those APIs. Backend selection can be cached for the lifetime of the Lua VM; borrowed camera/definition proxies must still be used only within their valid callbacks.
 
 
+`NativeMods/Camera_Unleasher.dll` is the complete plugin. Its exported `Init()` schedules internal initialization at `SDL_Init`, before SE type registration. The native-SE bypass remains unchanged. No shared coordinator, separate loader/payload, or Audio2Face dependency is required. Replace the process-lifetime DLL only with BG3 closed.
+
+
 The plugin registers these client events through the existing SE event manager. Each payload is a distinct native SE object inheriting lua::EventBase.
 
 | Events | Payload fields |
