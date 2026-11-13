@@ -1,4 +1,3 @@
-#include "deferred_startup.h"
 #define NOMINMAX
 #include <windows.h>
 #include <shlobj.h>
@@ -20,11 +19,15 @@
 using Byte=unsigned char;
 #include "addresses.h"
 #include "runtime_module.h"
+#include "se_api.h"
 #pragma comment(lib,"shell32.lib")
 #pragma comment(lib,"ole32.lib")
 #pragma comment(lib,"uuid.lib")
 static Byte* seBase; static Byte* gameBase;
-static std::atomic<void*> clientExt{};
+static bg3api::SEEnterLuaVMProc* enterVM;
+static bg3api::SEExitLuaVMProc* exitVM;
+static bg3api::SERegisterLuaStateChangeCallbackProc* registerStateChange;
+static DWORD clientThread;
 static std::atomic<void*> installedState{}; static std::atomic<bool> enabled{false};
 static std::atomic<bool> dispatchFailureReported{false};
 static FILE* logFile;static SRWLOCK logLock=SRWLOCK_INIT;
@@ -110,17 +113,20 @@ static void Bind(void* L,char const* name,int(*fn)(void*)){Se<void(*)(void*,char
 #include "native_payload.h"
 #include "cursor_visibility.h"
 #include "rotation_cursor.h"
-using InitializeFn=void(*)(void*);static InitializeFn nextInitialize;
-static void InitializeState(void* state){
- ++NativePayload::vmCount;nextInitialize(state);installedState=state;enabled=false;
+static int UpdateCursor(void*){CursorVisibility::Update();return 0;}
+static void InitializeState(lua_State* L){
+ // SE LuaExtraSpace stores State* followed by LifetimeHandle.
+ void* state=Field<void*>(reinterpret_cast<Byte*>(L)-2*sizeof(void*),0);
+ clientThread=GetCurrentThreadId();
+ ++NativePayload::vmCount;installedState=state;enabled=false;
  dispatchFailureReported.store(false,std::memory_order_relaxed);
  if(!NativePayload::ready){NativePayload::LogRegistrationState("client bindings refused");ReportFailure("native camera registration unavailable; bindings refused");return;}
- void* L=Field<void*>(state,SeAbi::StateLua);int top=Top(L);
+ int top=Top(L);
  if(!Se<int(*)(void*,int)>(RVA_CheckStack)(L,64)){ReportFailure("cannot reserve Lua stack");return;}
  auto failed=[&](){SetTop(L,top);ReportFailure("binding table creation failed");};
  auto ret=Load(state,"local camera={}; rawset(Ext,'ClientCamera',camera); return camera","NativeCameraBindings");
  if(!ret.hasValue || ret.value!=1){failed();return;}
- Bind(L,"GetCameraDefinition",NativePayload::Definition);SetTop(L,top);
+ Bind(L,"_UpdateCursor",UpdateCursor);Bind(L,"GetCameraDefinition",NativePayload::Definition);SetTop(L,top);
  ret=Load(state,"return Ext.Input","NativeInputBindings");
  if(!ret.hasValue || ret.value!=1){failed();return;}
  CursorVisibility::Initialize();
@@ -138,17 +144,25 @@ static void InitializeState(void* state){
  else ReportFailure("embedded Lua bootstrap initialization failed; native fallback retained");
  SetTop(L,top);
 }
-using UpdateFn=void(*)(void*,void const*);static UpdateFn nextUpdate;
-static void Update(void* ext,void const* time){clientExt.store(ext);nextUpdate(ext,time);CursorVisibility::Update();}
-using ShutdownFn=void(*)(void*);static ShutdownFn nextShutdown;
-static void Shutdown(void* ext){enabled=false;InputBindings::Shutdown();installedState=nullptr;clientExt.store(nullptr);KeyboardMovementOverride.store(0);BRIDGE_STAT(++generation);Log("client VM shutdown: dispatch ref invalidated; keyboard override false");nextShutdown(ext);KeyboardMovementOverride.store(0);CursorVisibility::Shutdown();RotationCursor::Shutdown();}
+static void StateChanged(bg3api::APIContext context,bg3api::APILuaStateEvent event,lua_State* L,void*){
+ if(context!=bg3api::APIContext::Client)return;
+ if(event==bg3api::APILuaStateEvent::Loading){InitializeState(L);return;}
+ if(event==bg3api::APILuaStateEvent::Unloading){
+  enabled=false;InputBindings::Shutdown();installedState=nullptr;KeyboardMovementOverride.store(0);
+  BRIDGE_STAT(++generation);Log("native API client unloading: dispatch invalidated; keyboard override false");
+ }else if(event==bg3api::APILuaStateEvent::Unloaded){
+  KeyboardMovementOverride.store(0);CursorVisibility::Shutdown();RotationCursor::Shutdown();
+ }
+}
 struct DispatchResult{bool successful=false;float value=0;bool hasNumber=false;bool prevented=false;uint16_t inputResult=0;};
 static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0,void* input=nullptr,double original=0,bool ignore=false,bool select=false,NativePayload::CommitEvent* commit=nullptr){
- DispatchResult result;void* ext=clientExt.load();if(!ext)return result;
+ DispatchResult result;if(!enabled.load()||GetCurrentThreadId()!=clientThread)return result;
  auto tls=reinterpret_cast<Byte**>(__readgsqword(0x58));auto tlsIndex=*reinterpret_cast<DWORD*>(seBase+RVA_TLSIndex);int& context=*reinterpret_cast<int*>(tls[tlsIndex]+TLS_ContextOffset);int priorContext=context;context=2;
- Se<void(*)(void*)>(RVA_IncRefs)(ext);void* state=Field<void*>(ext,SeAbi::ExtensionLua);
- if(enabled.load() && !Field<bool>(ext,SeAbi::ExtensionResetPending) && state && state==installedState.load()){
-  void* L=Field<void*>(state,SeAbi::StateLua);int top=Top(L);
+ auto L=enterVM(bg3api::APIContext::Client);
+ if(!L){context=priorContext;return result;}
+ void* state=Field<void*>(reinterpret_cast<Byte*>(L)-2*sizeof(void*),0);
+ if(enabled.load() && state==installedState.load()){
+  int top=Top(L);
   if(Se<int(*)(void*,int)>(RVA_CheckStack)(L,64)){
    alignas(8) Byte lifetime[SeAbi::PinBytes]{};alignas(8) Byte profiler[8]{};
    InitializeLifetimePin(lifetime,L,static_cast<Byte*>(state)+SeAbi::StateLifetimeStack);
@@ -159,7 +173,7 @@ static DispatchResult Dispatch(int event,void* camera,float dt,uint64_t entity=0
    SetTop(L,top);if(RVA_ProfilerDtor)Se<void(*)(void*)>(RVA_ProfilerDtor)(profiler);Se<void(*)(void*)>(RVA_LifetimeDtor)(lifetime);
   }
  }
- Se<void(*)(void*,bool)>(RVA_DecRefs)(ext,true);context=priorContext;return result;
+ exitVM(L);context=priorContext;return result;
 }
 using CommitCameraFn=void(*)(void*,void const*,NativePayload::Vector3 const&,NativePayload::Vector3 const&);static CommitCameraFn nextCommitCamera;
 static void CommitCamera(void* self,void const* entity,NativePayload::Vector3 const& eye,NativePayload::Vector3 const& target){
@@ -211,13 +225,8 @@ static bool ResolveRuntime(HMODULE module,bool& hasCameraEvents){
  if(hasCameraEvents)return true;
  Resolution result;
  if(!Resolve(image,result,why)){ReportFailure("SE resolver refused before hooks: "+why);return false;}
- RVA_OnUpdate=result.rva[Slot(Id::OnUpdate)];
- RVA_Shutdown=result.rva[Slot(Id::Shutdown)];
- RVA_IncRefs=result.rva[Slot(Id::IncRefs)];
- RVA_DecRefs=result.rva[Slot(Id::DecRefs)];
  RVA_LoadScript=result.rva[Slot(Id::LoadScript)];
  RVA_SetTop=result.rva[Slot(Id::SetTop)];
- RVA_ClientInitialize=result.rva[Slot(Id::ClientInitialize)];
  RVA_PushString=result.rva[Slot(Id::PushString)];
  RVA_PushClosure=result.rva[Slot(Id::PushClosure)];
  RVA_SetTable=result.rva[Slot(Id::SetTable)];
@@ -249,7 +258,6 @@ static bool ResolveRuntime(HMODULE module,bool& hasCameraEvents){
  RVA_ResizeStructs=result.rva[Slot(Id::ResizeStructs)];
  RVA_LifetimeCtor=result.rva[Slot(Id::LifetimeCtor)];
  SeAbi::FixedStringEvents=result.fixedStringEvents;
- SeAbi::ExtensionLua=result.extensionLua;
  SeAbi::StateLifetimeStack=result.stateLifetimeStack;
  RVA_LifetimeAllocate=result.rva[Slot(Id::LifetimeAllocate)];
  RVA_LifetimePush=result.rva[Slot(Id::LifetimePush)];
@@ -294,6 +302,8 @@ static bool LoadBootstrap(HMODULE module){
  companion.assign(bytes,size);return true;
 }
 static DWORD WINAPI Start(void* instance){
+ HMODULE pinned{};
+ if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(&Start),&pinned))return ERROR_INVALID_HANDLE;
  bool logAvailable=OpenLog();Log("standalone camera/input bridge starts");
  RuntimeModule::Finder finder;RuntimeModule::Candidate candidate;bool ambiguous=false;
  for(unsigned i=0;i<600 && !candidate.module;++i){candidate=finder.Find(ambiguous);if(ambiguous){ReportFailure("multiple standalone Script Extender modules found; no hooks installed");return 2;}if(!candidate.module)Sleep(100);}
@@ -306,10 +316,17 @@ static DWORD WINAPI Start(void* instance){
  bool hasCameraEvents=false;
  if(!ResolveRuntime(se,hasCameraEvents))return 3;
  if(hasCameraEvents){ReportStartup("SKIPPED: Script Extender provides native camera events; no bridge hooks or bindings installed.");return 0;}
+ auto version=reinterpret_cast<bg3api::SEGetAPIVersionProc*>(GetProcAddress(se,"SEGetAPIVersion"));
+ enterVM=reinterpret_cast<bg3api::SEEnterLuaVMProc*>(GetProcAddress(se,"SEEnterLuaVM"));
+ exitVM=reinterpret_cast<bg3api::SEExitLuaVMProc*>(GetProcAddress(se,"SEExitLuaVM"));
+ registerStateChange=reinterpret_cast<bg3api::SERegisterLuaStateChangeCallbackProc*>(GetProcAddress(se,"SERegisterLuaStateChangeCallback"));
+ if(!version||!enterVM||!exitVM||!registerStateChange||!bg3api::IsAPIVersionCompatible(version(),bg3api::APIVersion::VerInitial)){
+  ReportFailure("SE native API 1.0 is required; no hooks installed");return 3;
+ }
  auto game=GetModuleHandleW(nullptr);
  if(!ResolveGame(game))return 4;
  seBase=reinterpret_cast<Byte*>(se);gameBase=reinterpret_cast<Byte*>(game);
- Hook hooks[]={{RVA_TypeInitialize,true,reinterpret_cast<void**>(&NativePayload::nextTypeInitialize),reinterpret_cast<void*>(NativePayload::InitializeTypes),nullptr,0},{RVA_ResizeStructs,true,reinterpret_cast<void**>(&NativePayload::nextResize),reinterpret_cast<void*>(NativePayload::ResizeStatics),nullptr,0},{RVA_OnUpdate,true,reinterpret_cast<void**>(&nextUpdate),reinterpret_cast<void*>(Update),nullptr,0},{RVA_Shutdown,true,reinterpret_cast<void**>(&nextShutdown),reinterpret_cast<void*>(Shutdown),nullptr,0},{RVA_ClientInitialize,true,reinterpret_cast<void**>(&nextInitialize),reinterpret_cast<void*>(InitializeState),nullptr,0},{RVA_CommitCamera,false,reinterpret_cast<void**>(&nextCommitCamera),reinterpret_cast<void*>(CommitCamera),Bytes_CommitCamera,sizeof(Bytes_CommitCamera)},{RVA_UpdateCamera,false,reinterpret_cast<void**>(&nextCamera),reinterpret_cast<void*>(Camera),Bytes_UpdateCamera,sizeof(Bytes_UpdateCamera)},{RVA_UpdatePitch,false,reinterpret_cast<void**>(&nextUpdatePitch),reinterpret_cast<void*>(UpdatePitch),Bytes_UpdatePitch,sizeof(Bytes_UpdatePitch)},{RVA_UpdateZoom,false,reinterpret_cast<void**>(&nextZoom),reinterpret_cast<void*>(Zoom),Bytes_UpdateZoom,sizeof(Bytes_UpdateZoom)},{RVA_Pitch,false,reinterpret_cast<void**>(&nextPitch),reinterpret_cast<void*>(Pitch),Bytes_Pitch,sizeof(Bytes_Pitch)},{RVA_Input,false,reinterpret_cast<void**>(&nextInput),reinterpret_cast<void*>(Input),Bytes_Input,sizeof(Bytes_Input)},{RVA_ResetZoom,false,reinterpret_cast<void**>(&nextReset),reinterpret_cast<void*>(ResetZoom),Bytes_ResetZoom,sizeof(Bytes_ResetZoom)}};
+ Hook hooks[]={{RVA_TypeInitialize,true,reinterpret_cast<void**>(&NativePayload::nextTypeInitialize),reinterpret_cast<void*>(NativePayload::InitializeTypes),nullptr,0},{RVA_ResizeStructs,true,reinterpret_cast<void**>(&NativePayload::nextResize),reinterpret_cast<void*>(NativePayload::ResizeStatics),nullptr,0},{RVA_CommitCamera,false,reinterpret_cast<void**>(&nextCommitCamera),reinterpret_cast<void*>(CommitCamera),Bytes_CommitCamera,sizeof(Bytes_CommitCamera)},{RVA_UpdateCamera,false,reinterpret_cast<void**>(&nextCamera),reinterpret_cast<void*>(Camera),Bytes_UpdateCamera,sizeof(Bytes_UpdateCamera)},{RVA_UpdatePitch,false,reinterpret_cast<void**>(&nextUpdatePitch),reinterpret_cast<void*>(UpdatePitch),Bytes_UpdatePitch,sizeof(Bytes_UpdatePitch)},{RVA_UpdateZoom,false,reinterpret_cast<void**>(&nextZoom),reinterpret_cast<void*>(Zoom),Bytes_UpdateZoom,sizeof(Bytes_UpdateZoom)},{RVA_Pitch,false,reinterpret_cast<void**>(&nextPitch),reinterpret_cast<void*>(Pitch),Bytes_Pitch,sizeof(Bytes_Pitch)},{RVA_Input,false,reinterpret_cast<void**>(&nextInput),reinterpret_cast<void*>(Input),Bytes_Input,sizeof(Bytes_Input)},{RVA_ResetZoom,false,reinterpret_cast<void**>(&nextReset),reinterpret_cast<void*>(ResetZoom),Bytes_ResetZoom,sizeof(Bytes_ResetZoom)}};
  for(auto& hook:hooks){auto target=(hook.se?seBase:gameBase)+hook.rva;if(hook.bytes && memcmp(target,hook.bytes,hook.size)){ReportFailure("hook prologue mismatch; no hooks installed");return 5;}*hook.original=target;}
  CallPatch keyboard,pathCall,remapCall;auto site=gameBase+RVA_KeyboardGate;
  int32_t modeOffset;memcpy(&modeOffset,site+2,4);KeyboardMovementControllerMode=site+7+modeOffset;
@@ -354,12 +371,22 @@ static DWORD WINAPI Start(void* instance){
  keyboard.Discard();pathCall.Discard();remapCall.Discard();for(auto& patch:cursorCalls)patch.Discard();
  char message[160];snprintf(message,sizeof(message),"hooks result=%ld keyboard=%d bindings=%d; default override false",result,keyboardAvailable.load(),InputBindings::available);Log(message);
  if(result!=NO_ERROR)ReportFailure(lateRegistration?"SE type registration already completed before native loader initialization; no hooks installed":"hook installation failed with Windows error "+std::to_string(result));
- else{if(!RotationCursor::available)ReportStartup("WARNING: rotation cursor hooks unavailable; mouse confinement is disabled.");else Log("rotation cursor main-thread hooks installed");if(!keyboardAvailable.load())ReportStartup("WARNING: keyboard movement hook failed; WASD is unavailable.");if(!InputBindings::available)ReportStartup("WARNING: movement binding hooks failed; automatic WASD setup is unavailable.");}
+ else{registerStateChange(StateChanged,nullptr);Log("SE native API lifecycle registered; VM access uses native exports");if(!RotationCursor::available)ReportStartup("WARNING: rotation cursor hooks unavailable; mouse confinement is disabled.");else Log("rotation cursor main-thread hooks installed");if(!keyboardAvailable.load())ReportStartup("WARNING: keyboard movement hook failed; WASD is unavailable.");if(!InputBindings::available)ReportStartup("WARNING: movement binding hooks failed; automatic WASD setup is unavailable.");}
  return result;
 }
-// Initialize internally at SDL_Init, before SE finalizes type registration.
-static void InitializeDeferred(){if(!startupRequested.test_and_set())Start(bridgeInstance);}
-extern "C" __declspec(dllexport) void Init(){DeferredStartup::Schedule(InitializeDeferred);}
+// The updater invokes this after SE's LoadLibrary returns and before releasing
+// the game startup barrier. Camera types must be installed before PostStartup.
+static void InitializeOnce(){if(!startupRequested.test_and_set())Start(bridgeInstance);}
+static void ExtenderLoaded(HMODULE,void*){InitializeOnce();}
+extern "C" __declspec(dllexport) void Init(){
+ auto updater=GetModuleHandleW(L"DWrite.dll");
+ auto notify=updater?reinterpret_cast<bg3api::SEUpdaterNotifyWhenLoadedProc*>(GetProcAddress(updater,"SEUpdaterNotifyWhenLoaded")):nullptr;
+ if(notify){notify(ExtenderLoaded,nullptr);return;}
+ // Native Mod Loader calls Init after LoadLibrary returns, before game CRT
+ // initialization. Preserve this boundary on updaters without notifications;
+ // SDL_Init is too late for the camera's native type registration.
+ InitializeOnce();
+}
 BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){bridgeInstance=instance;DisableThreadLibraryCalls(instance);}return TRUE;}
 
 

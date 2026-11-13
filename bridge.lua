@@ -7,4 +7,7 @@ for _,name in ipairs(names) do
     manager:RegisterEngineEvent(name)
     camera[name]=manager.Events[name]
 end
+local updateCursor=camera._UpdateCursor
+camera._UpdateCursor=nil
+Ext.Events.Tick:Subscribe(updateCursor)
 return true

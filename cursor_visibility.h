@@ -1,4 +1,4 @@
-// Uses SDL's cursor API on the existing client-update hook.
+// Uses SDL's cursor API on the client Lua Tick callback.
 // Lua requests are applied on that thread; no input events or new hooks.
 namespace CursorVisibility {
 using ShowFn=int(*)(int);

@@ -178,17 +178,17 @@ static bool Layouts(Image const& image,Resolution& result,std::string& why){
  // The supported native forms witness both field operands in their complete bodies.
  bool nativePin=result.rva[Slot(Id::LifetimeCtor)]!=0;
  if(!nativePin && !result.rva[Slot(Id::LifetimeAllocate)]){why="missing lifetime constructor/allocation path";return false;}
- result.fixedStringEvents=result.forms[Slot(Id::DispatchEvent)]->pattern==Devel34DispatchEventPattern;
- result.extensionLua=nativePin?0x1780:0x1710;
- result.stateLifetimeStack=nativePin?0x8290:0x8288;
+ result.fixedStringEvents=(result.forms[Slot(Id::DispatchEvent)]->pattern==Devel34DispatchEventPattern || result.forms[Slot(Id::DispatchEvent)]->pattern==NativeAPIDispatchEventPattern);
+ result.extensionLua=0;
+ result.stateLifetimeStack=result.forms[Slot(Id::LoadScript)]->pattern==NativeAPILoadScriptPattern?0x8298:(nativePin?0x8290:0x8288);
  auto fieldWitness=[&](Id id,std::span<Byte const> prefix,uint32_t offset){
   auto f=result.symbols[Slot(id)];unsigned count=0;
   for(uint32_t n=0;n+prefix.size()+4<=f.bytes;++n){uint32_t value{};
    if(Match(image,f.rva+n,prefix)&&image.Read(f.rva+n+static_cast<uint32_t>(prefix.size()),value)&&value==offset)++count;
   }return count!=0;
  };
- constexpr Byte luaField[]={0x48,0x8b,0x8f},luaFieldRCX[]={0x48,0x8b,0x89},luaFieldRBX[]={0x48,0x8b,0x8b},stackField[]={0x4d,0x8d,0xaf};
- if(!(fieldWitness(Id::Shutdown,luaField,result.extensionLua)||fieldWitness(Id::Shutdown,luaFieldRCX,result.extensionLua)||fieldWitness(Id::Shutdown,luaFieldRBX,result.extensionLua))||!fieldWitness(Id::LoadScript,stackField,result.stateLifetimeStack)){why="unsupported client Lua/lifetime stack fields";return false;}
+ constexpr Byte stackField[]={0x4d,0x8d,0xaf};
+ if(!fieldWitness(Id::LoadScript,stackField,result.stateLifetimeStack)){why="unsupported client Lua/lifetime stack fields";return false;}
 
  uint32_t assign{},construct{},eventBase{};if(!ClassDescriptor(image,"lua::EventBase",assign,construct,why,&eventBase))return false;
  // The bridge embeds EventBase. Its inherited Stopped property is accessed by
