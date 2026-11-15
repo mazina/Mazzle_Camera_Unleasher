@@ -22,7 +22,7 @@ ml64 /nologo /c /Zi "%BRIDGE_PROJECT_DIR%keyboard.asm"
 if errorlevel 1 goto failed
 rc /nologo /i "%BRIDGE_PROJECT_DIR%." /fo bootstrap.res "%BRIDGE_PROJECT_DIR%bootstrap.rc"
 if errorlevel 1 goto failed
-cl /nologo %BRIDGE_DIAGNOSTIC_DEFINE% /std:c++20 /W4 /WX /O2 /Zi /MD /EHsc /LD /I"%BRIDGE_DETOURS_ROOT%\include" /external:I"%BRIDGE_JSON_ROOT%" /external:I"%BRIDGE_SDL_ROOT%" /external:W0 "%BRIDGE_PROJECT_DIR%bridge.cpp" keyboard.obj bootstrap.res /link /OUT:Camera_Unleasher.dll /PDB:Camera_Unleasher.pdb "%BRIDGE_DETOURS_ROOT%\lib.X64\detours.lib"
+cl /nologo %BRIDGE_DIAGNOSTIC_DEFINE% /std:c++20 /W4 /WX /O2 /Zi /MD /EHsc /LD /I"%BRIDGE_DETOURS_ROOT%\include" /external:I"%BRIDGE_JSON_ROOT%" /external:I"%BRIDGE_SDL_ROOT%" /external:W0 "%BRIDGE_PROJECT_DIR%bridge.cpp" keyboard.obj bootstrap.res /link /OUT:Mazzle_Camera_Unleasher.dll /PDB:Mazzle_Camera_Unleasher.pdb "%BRIDGE_DETOURS_ROOT%\lib.X64\detours.lib"
 if errorlevel 1 goto failed
 popd
 exit /b 0
