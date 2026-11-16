@@ -60,7 +60,6 @@ The path comes from the game's input-config reload call rather than an assumed d
 
 Native serialization follows SE rules: Ext.Types.Serialize(event) omits pointer fields. Direct JSON serialization requires the normal options for userdata/internal types, such as IterateUserdata=true and StringifyInternalTypes=true; stock default JSON options reject these native objects.
 
-Camera/input baseline build C0C0CF7D was live-tested on published Release C5E9041A: all ten native events, serialization and lifetimes, input cancellation, pitch overrides, actual WASD movement, and Lua reset recovery passed. The user confirmed cursor hide/show behavior with build 1F2A1433. Startup-order build 927F19DF remains deployed and passes the complete offline checks against Release, Devel791C11 and standalone DWrite3EDEFD76. The same DLL passes live startup, all ten native event payloads, reflection, serialization, field writes, lifetimes, initialized WASD bindings, and Lua reset recovery on Release and standalone DWrite, with no console errors or warnings. Devel has offline resolver coverage only for this build. Subsequent enumeration/error-code and deferred-log fixes passed the native build and 12 isolated startup regression scenarios; they have not been deployed or live-tested. The resolver discovers native functions from instruction anchors and native call/data relations in the loaded DLL, with PE function boundaries, class descriptors and bridge ABI witnesses. No SE version/hash whitelist or address profile is used; unsupported or ambiguous forms refuse hooks before activation. Game camera/WASD addresses are resolved from shared SE-patch instruction patterns, with unique-target and native instruction/reference checks; no game-executable hash whitelist is used. Final updater configuration is default Release (`{}`), without a pin. Exact patch API symmetry, a direct CameraDefinition property, and underlying ECS ClientCamera system reflection remain outside this implementation. The public Ext.ClientCamera Lua namespace is available.
 
 Startup status uses the `[Camera Unleasher]` console prefix: `LOADED` means the
 client camera/input bindings and embedded Lua registration completed; `FAILED`
@@ -72,7 +71,7 @@ the event and input paths are unchanged.
 
 Camera events and GetCameraDefinition are published under Ext.ClientCamera. Keyboard movement functions are published only under Ext.Input. Ext._Internal.MazzleNativeBridge is not created.
 
-Normal builds contain no statistics counters, counter updates, or diagnostic Lua functions. An intentional maintainer diagnostic build exposes Ext.ClientCamera._Diagnostics; there is no gameplay setting or runtime switch. See README.md for the build flag.
+Normal builds contain no statistics counters, counter updates, or diagnostic Lua functions. An intentional maintainer diagnostic build exposes Ext.ClientCamera._Diagnostics; there is no gameplay setting or runtime switch. Set BRIDGE_DIAGNOSTICS=1 before building to enable it.
 
 Deploy only Mazzle_Camera_Unleasher.dll in NativeMods. The Lua registration bootstrap is embedded in the DLL; bridge.lua remains editable source and requires a rebuild when changed. No separate Lua file is needed at runtime.
 
